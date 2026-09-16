@@ -312,6 +312,61 @@ def test_prefer_freshest_amendment_when_base_canceled(monkeypatch):
     assert res.status == "актуален"
 
 
+def test_authenticated_empty_search_falls_back_to_open_fund(monkeypatch):
+    monkeypatch.setattr("belener.stn_lookup.stn_ocr_variant_limit", lambda: 0)
+
+    class _OpenFund(_FakeClient):
+        def __init__(self) -> None:
+            super().__init__()
+            self._logged_in = False
+            self.card_requested = False
+
+        def search_all(self, queries):
+            if any("1.02.02" in q for q in queries):
+                return [
+                    {
+                        "docid": "open-1",
+                        "code": "СН 1.02.02-2023",
+                        "name": "Состав проектной документации",
+                        "activitydate": "2023-01-01",
+                        "status": "1",
+                    }
+                ]
+            return []
+
+        def fetch_card(self, doc_id: str) -> str:
+            assert doc_id == "open-1"
+            self.card_requested = True
+            return """
+            <tr><td class="doc-card-header">Обозначение</td><td>СН 1.02.02-2023</td></tr>
+            <tr><td class="doc-card-header">Дата введения</td><td>01.01.2023</td></tr>
+            <tr><td class="doc-card-header">Дата отмены</td><td>—</td></tr>
+            """
+
+    class _EmptyIps(_FakeClient):
+        def __init__(self, fund) -> None:
+            super().__init__()
+            self._allow_open_fallback = True
+            self.fund = fund
+
+        def search_all(self, queries):
+            return []
+
+        def _open_fund_client(self):
+            return self.fund
+
+        def fetch_card(self, doc_id: str) -> str:
+            raise AssertionError("IPS card endpoint must not be used for an open-fund row")
+
+    fund = _OpenFund()
+    result = lookup_one("СН", "СН 1.02.02", client=_EmptyIps(fund), today=date(2026, 9, 16))
+
+    assert result.found
+    assert result.stn_code == "СН 1.02.02-2023"
+    assert result.status == "актуален"
+    assert fund.card_requested
+
+
 def test_prefer_sn_amendment_2025_over_canceled_base(monkeypatch):
     """СН 2.01.01: база 2022 отменена, Изменение №1 действует с 09.06.2025."""
     monkeypatch.setattr("belener.stn_lookup.stn_lookup_enabled", lambda: True)

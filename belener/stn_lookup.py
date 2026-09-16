@@ -565,6 +565,18 @@ class StnClient:
         self._login_pass = (password or "").strip()
         self._login_error = ""
         self._http_lock = threading.RLock()
+        self._fund_fallback_client: StnClient | None = None
+        self._allow_open_fallback = True
+
+    def _open_fund_client(self) -> StnClient:
+        """Клиент открытого фонда для резервного поиска при пустом ответе IPS."""
+        with self._http_lock:
+            if self._fund_fallback_client is None:
+                self._fund_fallback_client = StnClient(
+                    base_url=self.base,
+                    timeout_sec=self.timeout,
+                )
+            return self._fund_fallback_client
 
     @property
     def _portal_page(self) -> str:
@@ -898,6 +910,31 @@ def lookup_one(
             log.warning("STN login failed: %s, continuing with open fund", cli._login_error)
 
         rows, used_q = _lookup_rows(kind, ref, client=cli, queries=queries, deadline=deadline)
+        search_cli = cli
+        card_cli = cli
+        # На части серверов авторизованный ips_list.php подтверждает сессию, но
+        # возвращает пустой список, тогда как открытый fond_list.php отвечает
+        # корректно. Повторяем тот же поиск в открытом фонде и карточку берём
+        # оттуда же. Закрытая ИПС остаётся основным источником.
+        if (
+            getattr(cli, "_logged_in", False)
+            and getattr(cli, "_allow_open_fallback", False)
+            and not _rank_stn_candidates(kind, ref, rows)
+        ):
+            fund_cli = cli._open_fund_client()
+            fund_rows, fund_used_q = _lookup_rows(
+                kind,
+                ref,
+                client=fund_cli,
+                queries=queries,
+                deadline=deadline,
+            )
+            search_cli = fund_cli
+            card_cli = fund_cli
+            if fund_rows:
+                rows.extend(fund_rows)
+                used_q = fund_used_q or used_q
+                log.info("STN IPS empty for %s; using open fund", ref)
         variant_retry = False
         if not _rank_stn_candidates(kind, ref, rows):
             variant_cap = stn_ocr_variant_limit()
@@ -911,7 +948,7 @@ def lookup_one(
                 if extra:
                     variant_retry = True
                     more, used_q = _lookup_rows(
-                        kind, ref, client=cli, queries=extra, deadline=deadline
+                        kind, ref, client=search_cli, queries=extra, deadline=deadline
                     )
                     rows.extend(more)
 
@@ -943,7 +980,7 @@ def lookup_one(
             doc_id = str(match.get("docid") or "")
             if not doc_id:
                 continue
-            card_html = cli.fetch_card(doc_id)
+            card_html = card_cli.fetch_card(doc_id)
             fields = parse_card_html(card_html)
             cand = _result_from_stn_card(
                 kind=kind,
