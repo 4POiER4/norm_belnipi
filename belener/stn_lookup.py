@@ -31,6 +31,35 @@ from belener.config import (
 log = logging.getLogger("belener.stn_lookup")
 
 
+_NETWORK_UNREACHABLE_ERRNOS = frozenset({101, 113, 10051, 10065})
+
+
+def _is_network_unreachable(error: object) -> bool:
+    """True для временной ошибки маршрута ОС/urllib.
+
+    urllib оборачивает OSError в URLError, а после сериализации результата у нас
+    остаётся только строка. Поэтому распознаём обе формы.
+    """
+    current: object | None = error
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, OSError) and getattr(current, "errno", None) in _NETWORK_UNREACHABLE_ERRNOS:
+            return True
+        reason = getattr(current, "reason", None)
+        if reason is current:
+            break
+        current = reason
+
+    text = str(error or "").casefold()
+    return (
+        "network is unreachable" in text
+        or "no route to host" in text
+        or "[errno 101]" in text
+        or "[errno 113]" in text
+    )
+
+
 class StnLoginError(RuntimeError):
     """Не удалось войти в IPS normy.stn.by."""
 
@@ -1063,6 +1092,38 @@ def refine_and_check_normative_refs(
                 with lock:
                     refined_map[key] = out_item
                     checks_map[key] = check
+
+    # Маршрут из Docker до STN иногда кратковременно пропадает. Не оставляем
+    # первые документы с ошибкой, если сеть восстановилась во время длинного
+    # пакета: в конце повторяем только ошибки маршрутизации, ровно один раз.
+    transient_items: list[dict[str, str]] = []
+    for item in items:
+        kind = str(item.get("kind") or "").strip()
+        ref = str(item.get("ref") or "").strip()
+        key = (kind.casefold(), _norm_code(search_query(kind, ref)))
+        check = checks_map.get(key)
+        if check is not None and check.error and _is_network_unreachable(check.error):
+            transient_items.append(item)
+
+    if transient_items and (deadline is None or time.monotonic() < deadline):
+        log.info(
+            "STN batch: retrying %s transient network failures",
+            len(transient_items),
+        )
+        recovered = 0
+        for item in transient_items:
+            if deadline is not None and time.monotonic() >= deadline:
+                break
+            key, out_item, check = _run_one(item)
+            refined_map[key] = out_item
+            checks_map[key] = check
+            if not check.error:
+                recovered += 1
+        log.info(
+            "STN batch: recovered %s/%s transient network failures",
+            recovered,
+            len(transient_items),
+        )
 
     refined: list[dict[str, str]] = []
     checks: list[StnCheckResult] = []

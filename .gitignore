@@ -15,6 +15,8 @@ frontend/dist/
 !back.png
 data/training/crops/
 data/training/yolo_zones/runs/
+data/previews/
+data/tmp/
 data/benchmark/*.md
 terminals/
 .cursor/

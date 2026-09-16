@@ -4,6 +4,7 @@ from belener.config import (
     gost_check_budget_human,
     gost_check_total_budget_sec,
     normative_ocr_budget_sec,
+    pipeline_stn_deadline,
     pipeline_tnpa_deadline,
     tnpa_batch_budget_sec,
     tile_grid_for_page_count,
@@ -55,6 +56,20 @@ def test_tnpa_budget_scales_with_refs_and_pages(monkeypatch):
     assert dl >= t0 + 180.0
 
 
+def test_stn_gets_fresh_budget_after_long_ocr():
+    """225-листовой OCR не должен оставить Стройдок с истёкшим дедлайном."""
+    import time
+
+    now = time.monotonic()
+    pipeline_started_long_ago = now - 20_000.0
+    deadline = pipeline_stn_deadline(
+        pipeline_t0=pipeline_started_long_ago,
+        page_count=225,
+        refs_count=40,
+    )
+    assert deadline >= now + 300.0
+
+
 def test_tile_grid_shrinks_for_many_pages():
     assert tile_grid_for_page_count(1) == (4, 2)
     assert tile_grid_for_page_count(3) == (3, 2)
@@ -79,6 +94,45 @@ def test_long_doc_ocr_budget_covers_full_pages():
     # 42 листа полного OCR должны влезать в окно тома, не в 280 с TILE_BUDGET.
     assert normative_ocr_budget_sec(42) >= 900.0
     assert normative_ocr_budget_sec(42) < gost_check_total_budget_sec(42)
+
+
+def test_long_document_skips_expensive_global_normative_reparse(monkeypatch):
+    from belener import normative_crops
+
+    calls: list[list[str]] = []
+
+    def _fake_finalize(sources):
+        calls.append(list(sources))
+        page_no = len(calls)
+        return [{"kind": "ГОСТ", "ref": f"ГОСТ {10000 + page_no}-2020"}]
+
+    monkeypatch.setattr(normative_crops, "_finalize_refs", _fake_finalize)
+    texts = [f"page {i}" for i in range(225)]
+    refs, page_refs = normative_crops._merge_document_refs(texts, list(texts))
+
+    assert len(calls) == 225
+    assert len(page_refs) == 225
+    assert len(refs) == 225
+
+
+def test_short_document_keeps_global_tile_voting(monkeypatch):
+    from belener import normative_crops
+
+    calls: list[list[str]] = []
+
+    def _fake_finalize(sources):
+        calls.append(list(sources))
+        return [{"kind": "ГОСТ", "ref": "ГОСТ 10704-91"}]
+
+    monkeypatch.setattr(normative_crops, "_finalize_refs", _fake_finalize)
+    refs, page_refs = normative_crops._merge_document_refs(
+        ["page one", "page two"],
+        ["tile one", "tile two", "tile three"],
+    )
+
+    assert len(calls) == 3  # две страницы + общий проход по тайлам
+    assert len(page_refs) == 2
+    assert len(refs) == 1
 
 
 def test_preview_page_indices_include_all_pages():

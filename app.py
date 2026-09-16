@@ -369,9 +369,7 @@ def _heartbeat_while_all(
             continue
 
 
-def stream_extract_pdf_normative(
-    path: str, filename: str, question: str, *, check_date=None, search_tnpa: bool = True
-):
+def stream_extract_pdf_normative(path: str, filename: str, question: str, *, check_date=None):
     """PDF → OCR страниц (плитки) → таблица нормативов + проверка ГОСТ на STN."""
     import time
     from datetime import date
@@ -382,7 +380,6 @@ def stream_extract_pdf_normative(
         gost_check_total_budget_sec,
         pipeline_post_ocr_deadline,
         pipeline_stn_deadline,
-        pipeline_tnpa_deadline,
         stn_lookup_enabled,
     )
     from belener.normative_extract import extract_normatives_pdf_path, normative_result_to_markdown
@@ -429,19 +426,16 @@ def stream_extract_pdf_normative(
         return
 
     from belener.stn_lookup import refine_and_check_normative_refs
-    from belener.tnpa_lookup import refine_and_check_normative_refs_tnpa
     from belener.normative_extract import generate_pdf_preview_pages_with_highlights
 
     stn_checks = []
-    tnpa_checks = []
     preview_box: dict = {"pages": None}
     post_done = threading.Event()
     stn_done = threading.Event()
-    tnpa_done = threading.Event()
     preview_done = threading.Event()
 
     def _maybe_post_done() -> None:
-        if stn_done.is_set() and tnpa_done.is_set() and preview_done.is_set():
+        if stn_done.is_set() and preview_done.is_set():
             post_done.set()
 
     page_count = int(result.get("page_count") or page_count)
@@ -477,6 +471,13 @@ def stream_extract_pdf_normative(
                     page_count=page_count,
                     refs_count=refs_count,
                 )
+                app.logger.info(
+                    "STN batch starting after OCR file=%s pages=%s refs=%s budget=%.0fs",
+                    filename,
+                    page_count,
+                    refs_count,
+                    max(0.0, stn_deadline - time.monotonic()),
+                )
                 refined, checks = refine_and_check_normative_refs(
                     result.get("normative_refs") or [],
                     today=validity_date,
@@ -493,43 +494,12 @@ def stream_extract_pdf_normative(
                 stn_done.set()
                 _maybe_post_done()
 
-        def _tnpa_run():
-            try:
-                refs_count = len(result.get("normative_refs") or [])
-                tnpa_deadline = pipeline_tnpa_deadline(
-                    pipeline_t0=pipeline_t0,
-                    page_count=page_count,
-                    refs_count=refs_count,
-                )
-                _, tnpa_result = refine_and_check_normative_refs_tnpa(
-                    result.get("normative_refs") or [],
-                    today=validity_date,
-                    deadline=tnpa_deadline,
-                )
-                result["tnpa_checks"] = [c.to_dict() for c in tnpa_result]
-                tnpa_checks.extend(tnpa_result)
-            except Exception as e:
-                app.logger.exception("TNPA batch failed file=%s", filename)
-                result["tnpa_error"] = _ollama_user_message(e)
-            finally:
-                tnpa_done.set()
-                _maybe_post_done()
-
         threading.Thread(target=_stn_run, daemon=True).start()
-        if search_tnpa:
-            threading.Thread(target=_tnpa_run, daemon=True).start()
-        else:
-            tnpa_done.set()
-            _maybe_post_done()
     else:
         stn_done.set()
-        tnpa_done.set()
         _maybe_post_done()
 
-    if search_tnpa and stn_lookup_enabled():
-        yield from _sse_status("Проверка Стройдок, ТНПА и превью…")
-    else:
-        yield from _sse_status("Проверка Стройдок и превью…")
+    yield from _sse_status("Проверка Стройдок и превью…")
     yield from _heartbeat_while_all(
         [post_done],
         page_count=page_count,
@@ -542,8 +512,8 @@ def stream_extract_pdf_normative(
         result,
         include_context=include_ctx,
         stn_checks=stn_checks,
-        tnpa_checks=tnpa_checks if search_tnpa else None,
-        include_tnpa=search_tnpa,
+        tnpa_checks=None,
+        include_tnpa=False,
         check_date=validity_date,
         source_path=path,
         preview_pages=preview_box.get("pages"),
@@ -552,9 +522,7 @@ def stream_extract_pdf_normative(
     yield "data: [DONE]\n\n"
 
 
-def stream_extract_image_normative(
-    path: str, filename: str, question: str, *, check_date=None, search_tnpa: bool = True
-):
+def stream_extract_image_normative(path: str, filename: str, question: str, *, check_date=None):
     """Изображение → OCR → таблица нормативов."""
     import time
     from datetime import date
@@ -563,7 +531,6 @@ def stream_extract_image_normative(
         gost_check_total_budget_sec,
         pipeline_post_ocr_deadline,
         pipeline_stn_deadline,
-        pipeline_tnpa_deadline,
         stn_lookup_enabled,
     )
     from belener.normative_extract import (
@@ -572,7 +539,6 @@ def stream_extract_image_normative(
         normative_result_to_markdown,
     )
     from belener.stn_lookup import refine_and_check_normative_refs
-    from belener.tnpa_lookup import refine_and_check_normative_refs_tnpa
 
     validity_date = check_date or date.today()
     pipeline_t0 = time.monotonic()
@@ -607,16 +573,14 @@ def stream_extract_image_normative(
     result = box["result"] or {}
     include_ctx = "контекст" in (question or "").casefold()
     stn_checks = []
-    tnpa_checks = []
     preview_box: dict = {"pages": None}
     post_done = threading.Event()
     stn_done = threading.Event()
-    tnpa_done = threading.Event()
     preview_done = threading.Event()
     post_deadline = pipeline_post_ocr_deadline(pipeline_t0=pipeline_t0, page_count=page_count)
 
     def _maybe_post_done() -> None:
-        if stn_done.is_set() and tnpa_done.is_set() and preview_done.is_set():
+        if stn_done.is_set() and preview_done.is_set():
             post_done.set()
 
     def _preview_run():
@@ -645,6 +609,13 @@ def stream_extract_image_normative(
                     page_count=page_count,
                     refs_count=refs_count,
                 )
+                app.logger.info(
+                    "STN batch starting after OCR file=%s pages=%s refs=%s budget=%.0fs",
+                    filename,
+                    page_count,
+                    refs_count,
+                    max(0.0, stn_deadline - time.monotonic()),
+                )
                 refined, checks = refine_and_check_normative_refs(
                     result.get("normative_refs") or [],
                     today=validity_date,
@@ -660,43 +631,12 @@ def stream_extract_image_normative(
                 stn_done.set()
                 _maybe_post_done()
 
-        def _tnpa_run():
-            try:
-                refs_count = len(result.get("normative_refs") or [])
-                tnpa_deadline = pipeline_tnpa_deadline(
-                    pipeline_t0=pipeline_t0,
-                    page_count=page_count,
-                    refs_count=refs_count,
-                )
-                _, tnpa_result = refine_and_check_normative_refs_tnpa(
-                    result.get("normative_refs") or [],
-                    today=validity_date,
-                    deadline=tnpa_deadline,
-                )
-                result["tnpa_checks"] = [c.to_dict() for c in tnpa_result]
-                tnpa_checks.extend(tnpa_result)
-            except Exception as e:
-                app.logger.exception("TNPA batch failed file=%s", filename)
-                result["tnpa_error"] = _ollama_user_message(e)
-            finally:
-                tnpa_done.set()
-                _maybe_post_done()
-
         threading.Thread(target=_stn_run, daemon=True).start()
-        if search_tnpa:
-            threading.Thread(target=_tnpa_run, daemon=True).start()
-        else:
-            tnpa_done.set()
-            _maybe_post_done()
     else:
         stn_done.set()
-        tnpa_done.set()
         _maybe_post_done()
 
-    if search_tnpa and stn_lookup_enabled():
-        yield from _sse_status("Проверка Стройдок, ТНПА и превью…")
-    else:
-        yield from _sse_status("Проверка Стройдок и превью…")
+    yield from _sse_status("Проверка Стройдок и превью…")
     yield from _heartbeat_while_all(
         [post_done],
         page_count=page_count,
@@ -709,8 +649,8 @@ def stream_extract_image_normative(
         result,
         include_context=include_ctx,
         stn_checks=stn_checks,
-        tnpa_checks=tnpa_checks if search_tnpa else None,
-        include_tnpa=search_tnpa,
+        tnpa_checks=None,
+        include_tnpa=False,
         check_date=validity_date,
         source_path=path,
         preview_pages=preview_box.get("pages"),
@@ -1327,8 +1267,6 @@ def api_chat(conv_id):
     user_override = request.form.get("model_override", "").strip().lower() in ("1", "true", "yes", "on")
     gost_mode = request.form.get("mode", "").strip()
     check_date = _parse_check_date(request.form.get("check_date"))
-    search_tnpa_raw = (request.form.get("search_tnpa") or "1").strip().lower()
-    search_tnpa = search_tnpa_raw not in ("0", "false", "no", "off")
     file = request.files.get("file")
 
     tmp_path = file_name = extracted_text = None
@@ -1426,7 +1364,6 @@ def api_chat(conv_id):
                             file_name or "document.pdf",
                             question,
                             check_date=check_date,
-                            search_tnpa=search_tnpa,
                         )
                     else:
                         gen = stream_extract_pdf(
@@ -1491,7 +1428,6 @@ def api_chat(conv_id):
                             file_name or "image.png",
                             question,
                             check_date=check_date,
-                            search_tnpa=search_tnpa,
                         ):
                             if chunk.startswith("data: ") and chunk != "data: [DONE]\n\n":
                                 try:

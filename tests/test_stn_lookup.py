@@ -7,6 +7,7 @@ from belener.stn_lookup import (
     StnLoginError,
     _digits_compatible,
     _iter_ocr_digit_variants,
+    _is_network_unreachable,
     check_normative_refs_stn,
     is_stn_checkable,
     lookup_one,
@@ -18,6 +19,59 @@ from belener.stn_lookup import (
     stn_checks_to_markdown,
     validity_status,
 )
+
+
+def test_network_unreachable_detection():
+    import urllib.error
+
+    assert _is_network_unreachable(urllib.error.URLError(OSError(101, "Network is unreachable")))
+    assert _is_network_unreachable("<urlopen error [Errno 113] No route to host>")
+    assert not _is_network_unreachable("таймаут normy.stn.by")
+
+
+def test_batch_retries_route_error_after_other_work(monkeypatch):
+    monkeypatch.setattr("belener.stn_lookup.stn_lookup_enabled", lambda: True)
+    monkeypatch.setattr("belener.stn_lookup.stn_parallel_workers", lambda: 1)
+
+    class _Client:
+        _logged_in = True
+        _login_user = "user"
+        _login_pass = "pass"
+
+        def _ensure_logged_in(self):
+            return None
+
+    calls: dict[str, int] = {}
+
+    def _fake_lookup(kind, ref, **_kwargs):
+        calls[ref] = calls.get(ref, 0) + 1
+        if ref == "СН 1.02.02" and calls[ref] == 1:
+            return StnCheckResult(
+                kind=kind,
+                ref=ref,
+                query=ref,
+                found=False,
+                status="ошибка проверки",
+                error="<urlopen error [Errno 101] Network is unreachable>",
+            )
+        return StnCheckResult(
+            kind=kind,
+            ref=ref,
+            query=ref,
+            found=True,
+            status="актуален",
+            stn_code=ref,
+        )
+
+    monkeypatch.setattr("belener.stn_lookup.lookup_one", _fake_lookup)
+    refs = [
+        {"kind": "СН", "ref": "СН 1.02.02"},
+        {"kind": "СП", "ref": "СП 1.02.01"},
+    ]
+    _, checks = refine_and_check_normative_refs(refs, client=_Client())
+
+    assert calls == {"СН 1.02.02": 2, "СП 1.02.01": 1}
+    assert all(check.found for check in checks)
 
 CARD_HTML = """
 <table class="doc-card-table">

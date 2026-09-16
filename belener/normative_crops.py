@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import logging
+import time
 from typing import Any
 
 import fitz
@@ -14,6 +16,13 @@ from belener.tile_ocr import (
     extract_document_tiles,
     page_tile_jobs,
 )
+
+log = logging.getLogger("belener.normative_crops")
+
+# На коротких документах общий проход нужен для голосования между пересекающимися
+# тайлами. На длинных документах используется сетка 1x1, поэтому повторный разбор
+# всего корпуса не добавляет сигнал, но даёт нелинейное время работы.
+GLOBAL_MERGE_MAX_PAGES = 20
 
 __all__ = [
     "PIPELINE",
@@ -31,6 +40,32 @@ def _finalize_refs(all_sources: list[str]) -> list[dict[str, str]]:
     if not uniq:
         return []
     return merge_normative_refs_from_sources(*uniq)
+
+
+def _merge_document_refs(
+    page_texts: list[str],
+    all_sources: list[str],
+) -> tuple[list[dict[str, str]], list[list[dict[str, str]]]]:
+    """Постраничный разбор и ограниченное голосование между OCR-источниками."""
+    page_normative_refs = [
+        _finalize_refs([text]) if str(text or "").strip() else []
+        for text in page_texts
+    ]
+    document_refs: list[dict[str, str]] = []
+    if len(page_texts) <= GLOBAL_MERGE_MAX_PAGES:
+        document_refs = _finalize_refs(all_sources)
+    else:
+        log.info(
+            "normative merge: skip global reparse pages=%s sources=%s chars=%s",
+            len(page_texts),
+            len(all_sources),
+            sum(len(str(s or "")) for s in all_sources),
+        )
+    refs = merge_normative_refs(
+        *[prefs for prefs in page_normative_refs if prefs],
+        document_refs,
+    )
+    return refs, page_normative_refs
 
 
 def extract_normatives_page_tiles(doc, page_index, *, dpi, deadline, tile_max_sec, overlap_frac):
@@ -82,15 +117,15 @@ def extract_normatives_document_crops(
         if layer not in all_sources:
             all_sources.insert(0, layer)
 
-    page_normative_refs = [
-        _finalize_refs([text]) if str(text or "").strip() else []
-        for text in page_texts
-    ]
+    parse_t0 = time.monotonic()
     # Сначала постраничные (как жёлтая подсветка), потом документный merge —
     # иначе соседи СН/СП пропадают из таблицы или уезжают в конец списка.
-    refs = merge_normative_refs(
-        *[prefs for prefs in page_normative_refs if prefs],
-        _finalize_refs(all_sources),
+    refs, page_normative_refs = _merge_document_refs(page_texts, all_sources)
+    log.info(
+        "normative merge done %.1fs pages=%s refs=%s",
+        time.monotonic() - parse_t0,
+        len(page_texts),
+        len(refs),
     )
     return {
         "ok": True,

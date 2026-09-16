@@ -770,7 +770,7 @@ def gost_check_extra_per_page_sec() -> float:
     """Базовая добавка с/лист для коротких/средних томов.
 
     Минимум 20 с: иначе длинные тома обрываются на OCR. По умолчанию 28 с —
-    запас на полный лист (сетка 1×1) + STN/TNPA хвост.
+    запас на полный лист (сетка 1×1) + хвост проверки Стройдока.
     """
     try:
         return max(20.0, float(os.environ.get("PDF_GOST_EXTRA_PER_PAGE_SEC", "28").strip()))
@@ -787,7 +787,7 @@ def gost_check_total_budget_max_sec() -> float:
 
 
 def gost_check_total_budget_sec(page_count: int = 1) -> float:
-    """Общий лимит OCR + STN/TNPA на один запрос.
+    """Основной лимит OCR на один запрос.
 
     Ступенчато по объёму (точность на коротких, покрытие на длинных):
     - листы 2–40: полный rate (env / 28 с)
@@ -828,7 +828,7 @@ def gost_check_budget_human(page_count: int = 1) -> str:
 
 
 def stn_pipeline_reserve_sec(page_count: int = 1, refs_count: int = 0) -> float:
-    """Резерв STN внутри общего бюджета (масштабируется с числом листов и нормативов)."""
+    """Пост-OCR бюджет STN (масштабируется с числом листов и нормативов)."""
     total = gost_check_total_budget_sec(page_count)
     pages = max(1, int(page_count))
     refs = max(int(refs_count), 0)
@@ -839,16 +839,20 @@ def stn_pipeline_reserve_sec(page_count: int = 1, refs_count: int = 0) -> float:
 
 
 def pipeline_stn_deadline(*, pipeline_t0: float, page_count: int = 1, refs_count: int = 0) -> float:
-    """Конец окна STN: не раньше чем через 15 с, даже если OCR вышел за общий лимит."""
+    """Отдельное окно STN, которое начинается после завершения OCR.
+
+    На больших PDF OCR может занять почти весь общий бюджет запроса. Если считать
+    дедлайн STN от начала пайплайна, проверка normy.stn.by стартует уже с
+    истёкшим окном и все нормативы помечаются как пропущенные. Поэтому время
+    старта пайплайна оставлено в сигнатуре для совместимости, но окно проверки
+    всегда отсчитывается от текущего момента.
+    """
     import time
 
+    del pipeline_t0
     now = time.monotonic()
-    total_deadline = pipeline_t0 + gost_check_total_budget_sec(page_count)
     reserve = stn_pipeline_reserve_sec(page_count, refs_count)
-    end = min(total_deadline, now + reserve)
-    if end > now + 1.0:
-        return max(now + 15.0, end)
-    return now + min(reserve, 45.0)
+    return now + max(60.0, reserve)
 
 
 def pipeline_preview_deadline(*, pipeline_t0: float, page_count: int = 1) -> float:
