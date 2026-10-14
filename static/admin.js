@@ -309,19 +309,19 @@
     return `
       <form class="site-form admin-form-grid" data-site-id="${esc(site.id || "")}">
         ${field(prefix + "name", "Название", site.name || "", {
-          placeholder: "ТНПА (tnpa.by) или Стройдок (normy.stn.by)",
+          placeholder: "NormaCS или Стройдок (normy.stn.by)",
           required: true,
           hint: "Произвольное имя для отображения в списке",
         })}
         ${field(prefix + "url", "Адрес сайта", site.site_url || "", {
-          placeholder: "https://tnpa.by",
+          placeholder: "http://n.nanocad.ru:9999/normacsweb/",
           required: true,
-          hint: "Полный URL, включая https:// (tnpa.by или normy.stn.by)",
+          hint: "Полный URL веб-интерфейса Стройдока или NormaCS, включая http:// или https://",
         })}
-        ${field(prefix + "login", "Логин", site.login || "", { hint: "Для Стройдока — учётная запись ИПС; для ТНПА можно не заполнять" })}
+        ${field(prefix + "login", "Логин", site.login || "", { hint: "Учётная запись Стройдока или NormaCS" })}
         ${field(prefix + "pass", "Пароль", "", {
           type: "password",
-          hint: isNew ? "Для Стройдока можно указать позже; ТНПА пароль не требует" : site.password_set ? "Сохранён — пусто = не менять" : "Не задан",
+          hint: isNew ? "Пароль хранится в базе в зашифрованном виде" : site.password_set ? "Сохранён — пусто = не менять" : "Не задан",
           autocomplete: "new-password",
         })}
         <div class="admin-actions">
@@ -341,7 +341,7 @@
 
     const list =
       sites.length === 0 && !state.sitesAdding
-        ? `<p class="admin-desc">Пока нет подключённых сайтов. Добавьте Стройдок (normy.stn.by) и/или ТНПА (tnpa.by) для проверки нормативов.</p>`
+        ? `<p class="admin-desc">Пока нет подключённых сайтов. Добавьте Стройдок и NormaCS для проверки нормативов.</p>`
         : sites
             .map(function (site) {
               if (state.sitesEditing === site.id) {
@@ -353,6 +353,8 @@
               <h2>${esc(site.name)}</h2>
               ${site.kind === "stn"
                 ? '<span class="admin-site-tag">Стройдок</span>'
+                : site.kind === "normacs"
+                  ? '<span class="admin-site-tag">NormaCS</span>'
                 : site.kind === "tnpa"
                   ? '<span class="admin-site-tag">ТНПА</span>'
                   : ""}
@@ -375,7 +377,7 @@
         <div class="admin-site-toolbar">
           <div>
             <h2>Внешние сайты</h2>
-            <p class="admin-desc" style="margin-bottom:0">Порталы проверки нормативов: Стройдок и ТНПА.</p>
+            <p class="admin-desc" style="margin-bottom:0">Проверка нормативов: Стройдок (РБ) и NormaCS (РФ).</p>
           </div>
           ${!state.sitesAdding ? `<button type="button" class="btn btn-primary btn-sm" id="btn-add-site">+ Добавить сайт</button>` : ""}
         </div>

@@ -10,6 +10,12 @@ let lastRetryRequest = null;
 const GOST_DEFAULT_QUESTION = 'Проверка ГОСТ на листе';
 const DRAWING_FILE_RE = /\.(pdf|png|jpe?g|bmp|gif|webp|tiff?)$/i;
 
+function consumeNormacsRequest(fd, isGostCheck) {
+  const requested = !!isGostCheck;
+  fd.append('normacs', requested ? '1' : '0');
+  return requested;
+}
+
 function getSelectedModel() {
   const el = document.getElementById('model-select');
   return (el && el.value) ? el.value : 'gemma3:4b';
@@ -30,6 +36,9 @@ function htmlToReadable(html) {
 
 function nodeToText(n) {
   if (n.nodeType === Node.TEXT_NODE) return n.textContent;
+  // Новые карточки дублируют каноническую таблицу: копируем исходный отчёт,
+  // а не элементы управления просмотром.
+  if (n.classList?.contains('review-generated')) return '';
   const t = n.tagName ? n.tagName.toLowerCase() : '';
   const ch = () => Array.from(n.childNodes).map(nodeToText).join('');
   if (t === 'pre') {
@@ -107,6 +116,7 @@ function fbCopy(text, cb) {
 
 function colorizeStnStatus(el) {
   el.querySelectorAll('table tr').forEach(tr => {
+    if (tr.closest('.normative-table-normacs')) return;
     tr.classList.remove('row-stn-cancel', 'row-stn-warn');
     const cells = tr.querySelectorAll('td');
     if (cells.length < 5) return;
@@ -362,7 +372,7 @@ function buildNormativeTablePdfDocDefinition(workspaceEl) {
       {
         table: {
           headerRows: 1,
-          widths: [70, 24, 22, 40, 40],
+          widths: headerRow.map(() => '*'),
           body: [headerRow, ...bodyRows],
         },
         layout: {
@@ -446,6 +456,13 @@ function buildNormativeTablePdfPayload(workspaceEl) {
     );
     if (m) summary = m[0].replace(/\s+/g, ' ').trim();
   }
+  if (!summary && rows.length && headers.some(h => /normacs/i.test(h)) && !headers.some(h => /стройдок/i.test(h))) {
+    const ncLinkIndex = headers.findIndex(h => /^normacs$/i.test(h));
+    const ncStatusIndex = headers.findIndex(h => /статус.*normacs/i.test(h));
+    const found = rows.filter(r => r.cells[ncLinkIndex]?.href).length;
+    const active = rows.filter(r => /^действует$/i.test(r.cells[ncStatusIndex]?.text || '')).length;
+    summary = `Всего в документе: ${rows.length}; найдено в NormaCS: ${found};\nдействует: ${active}`;
+  }
   if (!summary && rows.length) {
     const foundStn = rows.filter(r => r.cells[1] && r.cells[1].href).length;
     const active = rows.filter(r => r.fill === 'active').length;
@@ -459,6 +476,7 @@ function buildNormativeTablePdfPayload(workspaceEl) {
   }
   summary = summary.replace(/ИПС/gi, 'Стройдок');
   const hasTnpaCol = headers.some(h => /тнпа/i.test(h));
+  const hasNormacsCol = headers.some(h => /normacs/i.test(h));
   return {
     title: 'Таблица нормативов (ГОСТ/СП/СН и др.)',
     filename: `${filenameText.replace(/\.[^.]+$/, '')}-normatives.pdf`,
@@ -466,7 +484,7 @@ function buildNormativeTablePdfPayload(workspaceEl) {
     summary,
     headers,
     rows,
-    widths: hasTnpaCol ? [70, 24, 22, 40, 40] : [80, 30, 45, 45],
+    widths: hasNormacsCol ? headers.map(() => 30) : hasTnpaCol ? [70, 24, 22, 40, 40] : [80, 30, 45, 45],
   };
 }
 
@@ -556,9 +574,15 @@ const NORMATIVE_ROW_BG = {
 function applyNormativeTableLayout(root) {
   if (!root) return;
   root.querySelectorAll('.normative-table-container table').forEach(table => {
-    table.style.width = '936px';
-    table.style.minWidth = '936px';
-    table.style.maxWidth = '936px';
+    const normacs = table.classList.contains('normative-table-normacs');
+    const count = table.querySelectorAll('thead th').length;
+    const widths = normacs
+      ? [210, ...Array(Math.max(0, count - 2)).fill(140), 280]
+      : NORMATIVE_TABLE_COL_WIDTHS;
+    const tableWidth = `${widths.reduce((sum, width) => sum + width, 0)}px`;
+    table.style.width = tableWidth;
+    table.style.minWidth = tableWidth;
+    table.style.maxWidth = tableWidth;
     table.style.tableLayout = 'fixed';
     let cg = table.querySelector('colgroup');
     if (!cg) {
@@ -566,7 +590,7 @@ function applyNormativeTableLayout(root) {
       const head = table.querySelector('thead');
       table.insertBefore(cg, head || table.firstChild);
     }
-    cg.replaceChildren(...NORMATIVE_TABLE_COL_WIDTHS.map(w => {
+    cg.replaceChildren(...widths.map(w => {
       const col = document.createElement('col');
       col.style.width = `${w}px`;
       return col;
@@ -588,7 +612,14 @@ function applyNormativeRowColors(root) {
       if (tr.classList.contains('row-active')) bg = NORMATIVE_ROW_BG['row-active'];
       else if (tr.classList.contains('row-canceled')) bg = NORMATIVE_ROW_BG['row-canceled'];
       tr.querySelectorAll('td').forEach(td => {
-        td.style.setProperty('background-color', bg, 'important');
+        let cellBg = bg;
+        if (td.classList.contains('normacs-status')) {
+          cellBg = td.classList.contains('normacs-status-1') ? '#e8f5ec'
+            : td.classList.contains('normacs-status-0') ? '#fce9ea'
+            : td.classList.contains('normacs-status-2') || td.classList.contains('normacs-status-4')
+              ? '#fff4d6' : '#ffffff';
+        }
+        td.style.setProperty('background-color', cellBg, 'important');
       });
     });
   });
@@ -633,8 +664,12 @@ function beautifyNormativeHtml(root) {
     workspace.querySelectorAll('.normative-table-summary').forEach(el => {
       el.innerHTML = (el.innerHTML || '').replace(/ИПС/gi, 'Стройдок');
     });
+    if (typeof initReviewWorkspace === 'function') initReviewWorkspace(workspace);
   });
 
+  // renderAssistantMarkdown сериализует промежуточный DOM. Обработчики и
+  // ResizeObserver привязываем только к живым узлам, не к его временной копии.
+  if (root.isConnected) {
   root.querySelectorAll('.pdf-preview-container').forEach(box => {
     ensurePreviewStage(box);
     bindPreviewPan(box);
@@ -661,6 +696,7 @@ function beautifyNormativeHtml(root) {
     }
     fitPreviewImage(img);
   });
+  }
 
   ensureNormativeTablePdfDownloads(root);
 }
@@ -755,7 +791,7 @@ function _previewZoomAnchorFromBox(box) {
 function setPreviewZoom(img, nextScale, anchor) {
   if (!img) return;
   const box = img.closest('.pdf-preview-container');
-  const scale = Math.min(4, Math.max(0.5, Number(nextScale) || 1));
+  const scale = Math.min(4, Math.max(1, Number(nextScale) || 1));
   if (anchor && scale > 1.01) {
     _capturePreviewZoomAnchor(img, box, anchor);
   } else {
@@ -780,12 +816,19 @@ function setPreviewZoom(img, nextScale, anchor) {
 
 function fitPreviewImage(img) {
   if (!img) return;
+  const previewPage = img.closest('.normative-preview-page');
+  if (!img.isConnected || (previewPage && previewPage.hidden)) return;
   const box = img.closest('.pdf-preview-container');
   if (!box) return;
   const stage = ensurePreviewStage(box);
   if (!stage) return;
 
   const userScale = Math.max(0.5, Number(img.dataset.scale || '1') || 1);
+  const resetButton = previewPage?.querySelector('.preview-zoom-btn[data-action="reset"]');
+  if (resetButton) {
+    resetButton.textContent = `${Math.round(userScale * 100)}%`;
+    resetButton.setAttribute('aria-label', 'Вписать весь лист');
+  }
 
   if (!img.complete || !img.naturalWidth || box.clientWidth < 40 || box.clientHeight < 40) {
     if (!img.dataset.fitRetry) {
@@ -836,6 +879,7 @@ function fitPreviewImage(img) {
     box.style.overflow = 'hidden';
     box.scrollTop = 0;
     box.scrollLeft = 0;
+    if (typeof updateReviewOverlay === 'function') updateReviewOverlay(img);
     return;
   }
 
@@ -863,6 +907,7 @@ function fitPreviewImage(img) {
   img.style.transformOrigin = '0 0';
   img.style.cursor = 'grab';
   box.style.overflow = 'auto';
+  if (typeof updateReviewOverlay === 'function') updateReviewOverlay(img);
 }
 
 const _previewPanState = new WeakMap();
@@ -1108,6 +1153,118 @@ async function openChat(id) {
   }
   userScrolled = false;
   scrollEnd(true);
+  // Незавершённая серверная проверка восстанавливается без повторной загрузки PDF.
+  const jobData = {job: data.job};
+  if (currentConvId !== id || !jobData.job || jobData.job.state !== 'running') return;
+  if (msgs.some(m => m.role === 'assistant'
+    && Date.parse(m.created_at) >= jobData.job.started_at * 1000 - 1000)) return;
+  const ac = addMessage('assistant', '');
+  const progress = createProgress();
+  ac.appendChild(progress);
+  try {
+    const report = await waitForNormativeJob(id, progress, null, jobData.job.id);
+    if (report !== null && currentConvId === id) {
+      ac.innerHTML = renderAssistantMarkdown(report);
+      beautifyNormativeHtml(ac);
+      addCodeBtns(ac); addMsgCopy(ac, ac.innerHTML); addReportActions(ac, ac.innerHTML);
+      await loadConversations();
+    }
+  } catch (error) {
+    if (currentConvId === id) showInlineError(ac, error.message);
+  }
+}
+
+function createSseDecoder(onData) {
+  const decoder = new TextDecoder();
+  let buffer = '';
+  let finished = false;
+  return {
+    feed(bytes, final = false) {
+      buffer += decoder.decode(bytes, {stream: !final});
+      let newline;
+      while (!finished && (newline = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, newline).replace(/\r$/, '');
+        buffer = buffer.slice(newline + 1);
+        if (!line.startsWith('data: ')) continue;
+        const value = line.slice(6);
+        if (value === '[DONE]') { finished = true; break; }
+        onData(JSON.parse(value));
+      }
+      return finished;
+    },
+  };
+}
+
+async function readSseResponse(response, onData) {
+  if (!response.ok) {
+    const data = await response.json().catch(() => ({}));
+    throw new Error(data.error || `Сервер вернул HTTP ${response.status}`);
+  }
+  if (!response.body) throw new Error('Сервер не вернул поток ответа');
+  const reader = response.body.getReader();
+  const decoder = createSseDecoder(onData);
+  try {
+    while (true) {
+      const {done, value} = await reader.read();
+      if (decoder.feed(value, done)) return;
+      if (done) throw new Error('Соединение прервалось до завершения проверки');
+    }
+  } finally {
+    reader.releaseLock();
+  }
+}
+
+function abortableDelay(ms, signal) {
+  return new Promise((resolve, reject) => {
+    const abort = () => {
+      clearTimeout(timer);
+      signal.removeEventListener('abort', abort);
+      reject(new DOMException('Получение остановлено', 'AbortError'));
+    };
+    const timer = setTimeout(() => {
+      if (signal) signal.removeEventListener('abort', abort);
+      resolve();
+    }, ms);
+    if (signal) {
+      if (signal.aborted) abort();
+      else signal.addEventListener('abort', abort, {once: true});
+    }
+  });
+}
+
+async function waitForNormativeJob(convId, progress, signal, expectedId = null) {
+  let failures = 0;
+  while (currentConvId === convId) {
+    let data;
+    try {
+      const response = await fetch(`/api/conversations/${convId}/job`, {signal, cache: 'no-store'});
+      if (!response.ok) throw new Error('Не удалось получить состояние проверки');
+      data = await response.json();
+      failures = 0;
+    } catch (error) {
+      if (error.name === 'AbortError') throw error;
+      updateProgress(progress, {status: 'Связь потеряна. Восстанавливаю получение статуса; PDF повторно не загружается…'});
+      if (++failures >= 20) throw new Error('Сервер недоступен. После восстановления связи открой этот чат: готовый отчёт сохраняется в истории.');
+      await abortableDelay(3000, signal);
+      continue;
+    }
+    const job = data.job;
+    if (!job) throw new Error('Активная проверка не найдена. Проверь историю чата; при перезапуске сервера незавершённая задача прерывается.');
+    if (expectedId && job.id !== expectedId) return null;
+    if (job.state === 'running') {
+      updateProgress(progress, {status: `Проверка продолжается на сервере. ${job.status || ''}`});
+      await abortableDelay(3000, signal);
+      continue;
+    }
+    const response = await fetch(`/api/conversations/${convId}/messages`, {signal, cache: 'no-store'});
+    if (!response.ok) throw new Error('Не удалось загрузить сохранённый отчёт');
+    const messages = (await response.json()).messages || [];
+    const result = messages.filter(m => m.role === 'assistant'
+      && Date.parse(m.created_at) >= job.started_at * 1000 - 1000).pop();
+    if (result) return result.content;
+    throw new Error(job.error || 'Проверка завершилась без сохранённого отчёта');
+  }
+  return null;
 }
 
 async function deleteChat(e, id) {
@@ -1139,12 +1296,12 @@ function clearFeed() {
     <div class="welcome-hero">
       <div class="welcome-badge">Локальная обработка · данные не уходят в облако</div>
       <h1 class="welcome-title">Проверка ГОСТ<br>на чертеже</h1>
-      <p class="welcome-sub">Загрузите PDF или скан — система найдёт ГОСТ, ОСТ, СТП, РД, СНиП, ТУ, ТКП, СТБ и др. на всех листах и проверит актуальность на normy.stn.by. Ответ приходит сразу по готовности; лимит по времени — до ~10 мин на 8 листов, не более 40 мин на запрос.</p>
+      <p class="welcome-sub">Загрузите PDF или скан — система найдёт нормативы на всех листах и проверит их статус в NormaCS (РФ). Стройдок временно отключён.</p>
     </div>
     <div class="steps">
       <div class="step-card"><div class="step-num">1</div><div class="step-body"><div class="step-title">Загрузите файл</div><div class="step-desc">PDF, скан или изображение листа</div></div></div>
       <div class="step-card"><div class="step-num">2</div><div class="step-body"><div class="step-title">OCR находит нормативы</div><div class="step-desc">Поиск по всему листу, без подстановок</div></div></div>
-      <div class="step-card"><div class="step-num">3</div><div class="step-body"><div class="step-title">Проверка актуальности</div><div class="step-desc">Сверка с базой normy.stn.by</div></div></div>
+      <div class="step-card"><div class="step-num">3</div><div class="step-body"><div class="step-title">Проверка актуальности</div><div class="step-desc">NormaCS · РФ</div></div></div>
     </div>
     <div class="welcome-actions">
       <button type="button" class="action-card action-card-primary" onclick="document.getElementById('file-input').click()">
@@ -1192,13 +1349,24 @@ async function loadSystemStatus() {
     const banner = document.getElementById('system-banner');
     const modelSection = document.getElementById('model-section');
     if (data.gost_only && modelSection) modelSection.hidden = true;
-    if (!banner) return;
 
     const stn = data.stn || {};
+    const normacs = data.normacs || {};
+    const dateField = document.getElementById('stn-check-date-field');
+    if (dateField) dateField.hidden = !stn.enabled;
+    const modeBadge = document.getElementById('normacs-mode-badge');
+    if (modeBadge) {
+      const ready = normacs.enabled && normacs.configured;
+      modeBadge.textContent = ready ? 'Проверка: NormaCS · РФ' : 'NormaCS не настроен · проверьте Интеграции';
+      modeBadge.classList.toggle('warn', !ready);
+    }
+    if (!banner) return;
     if (!stn.enabled) {
       banner.hidden = false;
       banner.className = 'system-banner warn';
-      banner.textContent = 'Проверка актуальности на normy.stn.by отключена. Будет показан только список нормативов с листа.';
+      banner.textContent = normacs.enabled && normacs.configured
+        ? 'Проверка Стройдока отключена. По умолчанию проверяется только NormaCS.'
+        : 'Стройдок отключён, а NormaCS не настроен. Укажите логин и пароль в Интеграциях.';
     } else if (!stn.configured) {
       banner.hidden = false;
       banner.className = 'system-banner warn';
@@ -1207,6 +1375,12 @@ async function loadSystemStatus() {
       banner.hidden = false;
       banner.className = 'system-banner ok';
       banner.textContent = 'STN подключён: актуальность нормативов будет проверяться на normy.stn.by.';
+    }
+    if (normacs.enabled) {
+      banner.textContent += normacs.configured
+        ? ' NormaCS (РФ) запускается автоматически для каждого документа.'
+        : ' Для NormaCS укажите логин и пароль в Интеграциях или .env.';
+      if (!normacs.configured) banner.className = 'system-banner warn';
     }
   } catch (e) {
     const banner = document.getElementById('system-banner');
@@ -1548,32 +1722,29 @@ async function sendMessage() {
   fd.append('question', q); fd.append('model', model);
   const isGostCheck = !/извлеч|весь текст|прочитай/i.test(q);
   if (isGostCheck) fd.append('mode', 'gost');
+  lastRetryRequest.normacs = consumeNormacsRequest(fd, isGostCheck);
   const checkDateEl = document.getElementById('check-date');
   if (checkDateEl && checkDateEl.value) fd.append('check_date', checkDateEl.value);
   if (modelWasOverridden) fd.append('model_override', '1');
   if (fc) fd.append('file', fc);
 
-  let raw = '', first = true;
+  let raw = '', first = true, jobId = null;
+  const requestConvId = currentConvId;
+  const requestController = abortController;
   try {
-    const res = await fetch(`/api/conversations/${currentConvId}/chat`, {
-      method: 'POST', body: fd, signal: abortController.signal
+    const res = await fetch(`/api/conversations/${requestConvId}/chat`, {
+      method: 'POST', body: fd, signal: requestController.signal
     });
-    const reader = res.body.getReader(), dec = new TextDecoder();
-    while (true) {
-      const {done, value} = await reader.read(); if (done) break;
-      for (const line of dec.decode(value).split('\n')) {
-        if (!line.startsWith('data: ')) continue;
-        const p = line.slice(6); if (p === '[DONE]') break;
-        try {
-          const o = JSON.parse(p);
+    await readSseResponse(res, o => {
+          if (o.job_id) jobId = o.job_id;
           if (o.error) {
             showToast(o.error, true);
             showInlineError(ac, o.error);
             first = false;
-            break;
+            return;
           }
           if (o.title) {
-            updateChatTitle(currentConvId, o.title);
+            updateChatTitle(requestConvId, o.title);
           }
           if (o.status) {
             updateProgress(progress, o);
@@ -1585,13 +1756,27 @@ async function sendMessage() {
             ac.innerHTML = renderAssistantMarkdown(raw) + '<span class="cursor"></span>';
             addCodeBtns(ac); scrollEnd();
           }
-        } catch(e) {}
-      }
-    }
+    });
   } catch(err) {
     if (err.name !== 'AbortError') {
-      showInlineError(ac, 'Ошибка соединения с сервером');
-      showToast('Ошибка соединения', true);
+      if (isGostCheck && currentConvId === requestConvId) {
+        if (!progress.isConnected) ac.appendChild(progress);
+        updateProgress(progress, {status: 'Соединение прервалось. Проверяю серверную задачу без повторной загрузки PDF…'});
+        try {
+          const report = await waitForNormativeJob(requestConvId, progress, requestController.signal, jobId);
+          if (report !== null) { raw = report; first = false; progress.remove(); }
+        } catch (recoveryError) {
+          if (recoveryError.name !== 'AbortError') {
+            showInlineError(ac, recoveryError.message);
+            showToast(recoveryError.message, true);
+          }
+        }
+      } else {
+        showInlineError(ac, err.message || 'Ошибка соединения с сервером');
+        showToast('Ошибка соединения', true);
+      }
+    } else if (jobId) {
+      showToast('Получение ответа остановлено. Проверка продолжится на сервере; результат появится в истории чата.');
     }
   }
 
@@ -1809,6 +1994,9 @@ function showNormativePreviewPage(groupId, pageNo) {
     box.scrollLeft = 0;
   }
   const img = target.querySelector('.pdf-preview-img');
+  if (img) img.loading = 'eager';
+  const workspace = target.closest('.normative-workspace');
+  if (workspace && typeof syncReviewPage === 'function') syncReviewPage(workspace);
   if (img) {
     img.dataset.scale = '1';
     delete img.dataset.fitKey;

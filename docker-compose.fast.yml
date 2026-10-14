@@ -1,4 +1,4 @@
-# Проверка ГОСТ на листе (tile OCR + STN, без LLM-отчёта).
+# Проверка ГОСТ на листе (tile OCR + NormaCS, без LLM-отчёта).
 #   docker compose -f docker-compose.yml -f docker-compose.fast.yml up -d --build
 
 services:
@@ -22,7 +22,7 @@ services:
       PDF_NORMATIVE_SKIP_TILES_MIN_REFS: ${PDF_NORMATIVE_SKIP_TILES_MIN_REFS:-0}
       PDF_NORMATIVE_SUPPLEMENT_SEC: ${PDF_NORMATIVE_SUPPLEMENT_SEC:-28}
       PDF_NORMATIVE_WIDE_DPI_BOOST: ${PDF_NORMATIVE_WIDE_DPI_BOOST:-1.15}
-      PDF_STN_LOOKUP: ${PDF_STN_LOOKUP:-1}
+      PDF_STN_LOOKUP: ${PDF_STN_LOOKUP:-0}
       PDF_STN_BASE_URL: ${PDF_STN_BASE_URL:-https://normy.stn.by}
       PDF_STN_LOGIN: ${PDF_STN_LOGIN:-}
       PDF_STN_PASSWORD: ${PDF_STN_PASSWORD:-}

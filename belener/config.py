@@ -1237,7 +1237,7 @@ def report_llm_model() -> str:
 
 
 def stn_lookup_enabled() -> bool:
-    return (os.environ.get("PDF_STN_LOOKUP") or "1").strip().lower() in (
+    return (os.environ.get("PDF_STN_LOOKUP") or "0").strip().lower() in (
         "1",
         "true",
         "yes",
@@ -1303,6 +1303,49 @@ def stn_password() -> str:
     except Exception:
         pass
     return (os.environ.get("PDF_STN_PASSWORD") or os.environ.get("STN_PASSWORD") or "").strip()
+
+
+def normacs_credentials() -> dict[str, str]:
+    from belener.integration_store import get_normacs_credentials
+
+    return get_normacs_credentials()
+
+
+def normacs_lookup_enabled() -> bool:
+    raw = (os.environ.get("PDF_NORMACS_LOOKUP") or "auto").strip().lower()
+    if raw in ("0", "false", "no", "off"):
+        return False
+    if raw in ("1", "true", "yes", "on"):
+        return True
+    creds = normacs_credentials()
+    return bool(creds.get("login") and creds.get("password"))
+
+
+def normacs_timeout_sec() -> int:
+    try:
+        return max(5, min(int(os.environ.get("PDF_NORMACS_TIMEOUT", "30")), 60))
+    except ValueError:
+        return 30
+
+
+def normacs_retries() -> int:
+    try:
+        return max(0, min(int(os.environ.get("PDF_NORMACS_RETRIES", "1")), 2))
+    except ValueError:
+        return 1
+
+
+def normacs_document_budget_sec() -> float:
+    return normacs_timeout_sec() * (normacs_retries() + 1) + 2
+
+
+def normacs_batch_budget_sec(refs_count: int) -> float:
+    try:
+        cap = max(60, min(int(os.environ.get("PDF_NORMACS_BUDGET_MAX", "3600")), 14400))
+    except ValueError:
+        cap = 3600
+    # timeout относится к целому документу; оставляем окно для каждого обозначения.
+    return min(cap, max(120, refs_count * normacs_document_budget_sec() + 30))
 
 
 def stn_timeout_sec() -> int:

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Проверка настроек tile OCR + STN (локально, без Docker)."""
+"""Проверка настроек tile OCR; Стройдок временно отключён по умолчанию."""
 
 from __future__ import annotations
 
@@ -24,7 +24,7 @@ COMPOSE_STN = {
 
 ENV_EXAMPLES = sorted(ROOT.glob(".env*.example"))
 RECOMMENDED = {
-    "PDF_STN_LOOKUP": "1",
+    "PDF_STN_LOOKUP": "0",
     "PDF_STN_BASE_URL": "https://normy.stn.by",
     "PDF_TILE_OCR_DPI": "320",
     "PDF_TILE_OCR_TIME_BUDGET": "180",

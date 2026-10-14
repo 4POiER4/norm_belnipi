@@ -367,7 +367,7 @@ def admin_test_site(site_id: str):
     if not site:
         return jsonify({"error": "Сайт не найден"}), 404
     if not site.get("can_test"):
-        return jsonify({"error": "Проверка доступна только для Стройдок и ТНПА"}), 400
+        return jsonify({"error": "Проверка доступна для Стройдок, NormaCS и ТНПА"}), 400
 
     kind = (site.get("kind") or "").strip().lower()
     site_url = (site.get("site_url") or "").strip()
@@ -378,6 +378,17 @@ def admin_test_site(site_id: str):
     creds = resolve_site_credentials(site_id)
     if not creds or not creds.get("login") or not creds.get("password"):
         return jsonify({"error": "Укажите логин и пароль"}), 400
+    if kind == "normacs" or "normacs" in site_url.casefold() or "nanocad.ru" in site_url.casefold():
+        from belener.normacs_lookup import NormacsClient, NormacsError
+        client = NormacsClient(**creds)
+        try:
+            client.login()
+            rows = client.search("ГОСТ 21105-87")
+            return jsonify({"success": True, "message": f"NormaCS: вход выполнен; совпадений: {len(rows)}"})
+        except NormacsError as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
+        finally:
+            client.close()
     reset_stn_client()
     client = StnClient(base_url=creds.get("base_url") or None, login=creds["login"], password=creds.get("password") or "")
     try:
@@ -385,5 +396,4 @@ def admin_test_site(site_id: str):
         return jsonify({"success": True, "message": "Вход выполнен успешно"})
     except Exception as e:
         return jsonify({"success": False, "message": str(e)}), 400
-
 

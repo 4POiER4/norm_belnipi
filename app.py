@@ -16,6 +16,7 @@ from flask import Flask, request, Response, send_file, send_from_directory, stre
 import psycopg2
 import psycopg2.extras
 import ollama
+from belener.background_stream import JobRegistry
 
 from belener.config import (
     model_drawing,
@@ -31,6 +32,7 @@ from belener.normative_pdf import build_normative_pdf_bytes
 from belener.scanned import is_scanned_pdf
 
 app = Flask(__name__, static_folder="static")
+_normative_jobs = JobRegistry()
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s %(message)s")
 logging.getLogger("belener").setLevel(logging.INFO)
 ROOT_DIR = app.root_path
@@ -356,6 +358,7 @@ def _heartbeat_while_all(
     page_count: int,
     budget_sec: float,
     t0: float,
+    status_fn=None,
 ):
     """Ждать несколько фоновых задач (STN + превью параллельно)."""
     import time
@@ -364,13 +367,17 @@ def _heartbeat_while_all(
         if all(ev.is_set() for ev in events):
             break
         elapsed = int(time.monotonic() - t0)
-        yield from _sse_status(_gost_pipeline_progress_status(page_count, elapsed, budget_sec))
-        if not any(ev.wait(timeout=12) for ev in events):
-            continue
+        yield from _sse_status(status_fn() if status_fn else
+                               _gost_pipeline_progress_status(page_count, elapsed, budget_sec))
+        # Уже установленное событие нельзя использовать для wait: это создаёт
+        # горячий цикл и тысячи сообщений в секунду, когда второй источник ещё занят.
+        pending = [ev for ev in events if not ev.is_set()]
+        if pending:
+            pending[0].wait(timeout=12)
 
 
-def stream_extract_pdf_normative(path: str, filename: str, question: str, *, check_date=None):
-    """PDF → OCR страниц (плитки) → таблица нормативов + проверка ГОСТ на STN."""
+def stream_extract_pdf_normative(path: str, filename: str, question: str, *, check_date=None, normacs_requested=True):
+    """PDF → OCR страниц (плитки) → таблица нормативов + проверка NormaCS."""
     import time
     from datetime import date
 
@@ -425,6 +432,8 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
         yield from _sse_error(str(result.get("error") or "Не удалось прочитать PDF"))
         return
 
+    result["stn_enabled"] = stn_lookup_enabled()
+
     from belener.stn_lookup import refine_and_check_normative_refs
     from belener.normative_extract import generate_pdf_preview_pages_with_highlights
 
@@ -433,6 +442,8 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
     post_done = threading.Event()
     stn_done = threading.Event()
     preview_done = threading.Event()
+
+    normacs_done = _start_normacs_checks(result, requested=normacs_requested)
 
     def _maybe_post_done() -> None:
         if stn_done.is_set() and preview_done.is_set():
@@ -460,7 +471,7 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
 
     threading.Thread(target=_preview_run, daemon=True).start()
 
-    if stn_lookup_enabled():
+    if result["stn_enabled"]:
         stn_box: dict = {"err": None}
 
         def _stn_run():
@@ -499,12 +510,14 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
         stn_done.set()
         _maybe_post_done()
 
-    yield from _sse_status("Проверка Стройдок и превью…")
+    yield from _sse_status("Проверка NormaCS и подготовка листов…" if result.get("normacs_enabled")
+                           else "Подготовка листов…")
     yield from _heartbeat_while_all(
-        [post_done],
+        [post_done, normacs_done],
         page_count=page_count,
         budget_sec=budget_sec,
         t0=pipeline_t0,
+        status_fn=lambda: _normative_post_status(result, stn_done, preview_done, normacs_done),
     )
 
     include_ctx = "контекст" in (question or "").casefold()
@@ -514,7 +527,7 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
         stn_checks=stn_checks,
         tnpa_checks=None,
         include_tnpa=False,
-        check_date=validity_date,
+        check_date=validity_date if result["stn_enabled"] else None,
         source_path=path,
         preview_pages=preview_box.get("pages"),
     )
@@ -522,7 +535,52 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
     yield "data: [DONE]\n\n"
 
 
-def stream_extract_image_normative(path: str, filename: str, question: str, *, check_date=None):
+def _start_normacs_checks(result: dict, *, requested: bool = True) -> threading.Event:
+    """Основной источник проверяется после OCR с отдельным бюджетом времени."""
+    from belener.config import normacs_lookup_enabled, normacs_batch_budget_sec
+    from belener.normacs_lookup import check_normative_refs_normacs
+    import time
+
+    done = threading.Event()
+    result["normacs_requested"] = bool(requested)
+    result["normacs_enabled"] = bool(requested and normacs_lookup_enabled())
+    if requested and not result["normacs_enabled"]:
+        result["normacs_error"] = "NormaCS запрошен, но интеграция отключена или не настроена. Проверьте Интеграции в админке."
+    if not result["normacs_enabled"]:
+        done.set()
+        return done
+    refs = list(result.get("normative_refs") or [])
+
+    def run():
+        try:
+            budget = normacs_batch_budget_sec(len(refs))
+            app.logger.info("NormaCS batch starting after OCR file=%s refs=%s budget=%.0fs",
+                            result.get("filename"), len(refs), budget)
+            checks = check_normative_refs_normacs(refs, deadline=time.monotonic() + budget,
+                on_progress=lambda completed, total: result.update(normacs_progress=f"{completed}/{total}"))
+            result["normacs_checks"] = [c.to_dict() for c in checks]
+        except Exception:
+            app.logger.exception("NormaCS batch failed")
+            result["normacs_error"] = "NormaCS: не удалось выполнить проверку"
+        finally:
+            done.set()
+
+    threading.Thread(target=run, daemon=True).start()
+    return done
+
+
+def _normative_post_status(result, stn_done, preview_done, normacs_done):
+    stages = []
+    if result.get("stn_enabled"):
+        stages.append("Стройдок: " + ("завершён" if stn_done.is_set() else "проверяется"))
+    if result.get("normacs_enabled"):
+        stages.append("NormaCS: " + ("завершён" if normacs_done.is_set() else
+                      "проверено " + result.get("normacs_progress", "0")))
+    stages.append("Превью: " + ("готово" if preview_done.is_set() else "формируется"))
+    return ". ".join(stages) + "."
+
+
+def stream_extract_image_normative(path: str, filename: str, question: str, *, check_date=None, normacs_requested=True):
     """Изображение → OCR → таблица нормативов."""
     import time
     from datetime import date
@@ -571,12 +629,14 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
         return
 
     result = box["result"] or {}
+    result["stn_enabled"] = stn_lookup_enabled()
     include_ctx = "контекст" in (question or "").casefold()
     stn_checks = []
     preview_box: dict = {"pages": None}
     post_done = threading.Event()
     stn_done = threading.Event()
     preview_done = threading.Event()
+    normacs_done = _start_normacs_checks(result, requested=normacs_requested)
     post_deadline = pipeline_post_ocr_deadline(pipeline_t0=pipeline_t0, page_count=page_count)
 
     def _maybe_post_done() -> None:
@@ -600,7 +660,7 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
 
     threading.Thread(target=_preview_run, daemon=True).start()
 
-    if stn_lookup_enabled():
+    if result["stn_enabled"]:
         def _stn_run():
             try:
                 refs_count = len(result.get("normative_refs") or [])
@@ -636,12 +696,14 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
         stn_done.set()
         _maybe_post_done()
 
-    yield from _sse_status("Проверка Стройдок и превью…")
+    yield from _sse_status("Проверка NormaCS и подготовка листов…" if result.get("normacs_enabled")
+                           else "Подготовка листов…")
     yield from _heartbeat_while_all(
-        [post_done],
+        [post_done, normacs_done],
         page_count=page_count,
         budget_sec=budget_sec,
         t0=pipeline_t0,
+        status_fn=lambda: _normative_post_status(result, stn_done, preview_done, normacs_done),
     )
 
     include_ctx = "контекст" in (question or "").casefold()
@@ -651,7 +713,7 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
         stn_checks=stn_checks,
         tnpa_checks=None,
         include_tnpa=False,
-        check_date=validity_date,
+        check_date=validity_date if result["stn_enabled"] else None,
         source_path=path,
         preview_pages=preview_box.get("pages"),
     )
@@ -1232,6 +1294,8 @@ def api_delete_conversation(conv_id):
 
 @app.route("/api/conversations/<conv_id>/messages", methods=["GET"])
 def api_get_messages(conv_id):
+    job = _normative_jobs.get(conv_id)
+    state = job.snapshot() if job else None
     with get_db() as conn:
         with conn.cursor() as cur:
             cur.execute(
@@ -1244,7 +1308,7 @@ def api_get_messages(conv_id):
                 (conv_id,)
             )
             rows = cur.fetchall()
-    return {"messages": [dict(r) for r in rows]}
+    return {"messages": [dict(r) for r in rows], "job": state}
 
 
 @app.route("/api/conversations/<conv_id>/title", methods=["PATCH"])
@@ -1258,6 +1322,68 @@ def api_update_title(conv_id):
     return {"ok": True}
 
 
+@app.route("/api/conversations/<conv_id>/job")
+def api_normative_job(conv_id):
+    job = _normative_jobs.get(conv_id)
+    return {"job": job.snapshot() if job else None}
+
+
+@app.route("/api/conversations/<conv_id>/job/stream")
+def api_normative_job_stream(conv_id):
+    job = _normative_jobs.get(conv_id)
+    if job is None:
+        return {"error": "Активная проверка не найдена; готовые отчёты находятся в истории чата"}, 404
+    return Response(job.stream(), mimetype="text/event-stream", headers={
+        "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no",
+    })
+
+
+def _normative_job_events(conv_id, path, filename, ext, question, model, check_date, *, normacs_requested=True):
+    """Обработка, сохранение и очистка принадлежат worker, а не HTTP-генератору."""
+    with app.app_context():
+        parts = []
+        try:
+            generator = (stream_extract_pdf_normative(path, filename, question, check_date=check_date, normacs_requested=normacs_requested)
+                         if ext == ".pdf" else
+                         stream_extract_image_normative(path, filename, question, check_date=check_date, normacs_requested=normacs_requested))
+            for frame in generator:
+                if frame.startswith("data: ") and frame.strip() != "data: [DONE]":
+                    payload = json.loads(frame[6:].strip())
+                    parts.append(payload.get("text") or payload.get("error") or "")
+                yield frame
+        except Exception as exc:
+            app.logger.exception("normative job processing failed conversation=%s file=%s", conv_id, filename)
+            message = f"Ошибка обработки: {_ollama_user_message(exc)}"
+            parts.append(message)
+            yield from _sse_error(message)
+        finally:
+            try:
+                report = "".join(parts)
+                if report:
+                    # Блокируем удаление чата на время сохранения, а удалённые
+                    # пользователем чаты не восстанавливаем и не создаём заново.
+                    with get_db() as conn:
+                        with conn.cursor() as cur:
+                            cur.execute("SELECT id FROM conversations WHERE id = %s FOR KEY SHARE", (conv_id,))
+                            exists = cur.fetchone()
+                        if exists:
+                            save_message(conv_id, "assistant", report, model,
+                                         attachment_name=filename, attachment_text=report)
+                    if exists:
+                        title = derive_chat_title(question, filename)
+                        with get_db() as conn:
+                            with conn.cursor() as cur:
+                                cur.execute("UPDATE conversations SET title = %s WHERE id = %s", (title, conv_id))
+                            conn.commit()
+                        app.logger.info("normative report saved conversation=%s chars=%s", conv_id, len(report))
+                        yield 'data: ' + json.dumps({"title": title, "conv_id": conv_id}) + '\n\n'
+                    else:
+                        app.logger.info("normative report discarded: conversation deleted id=%s", conv_id)
+            finally:
+                if os.path.exists(path):
+                    os.unlink(path)
+
+
 # ── роут: чат ─────────────────────────────────────────────────────────────────
 
 @app.route("/api/conversations/<conv_id>/chat", methods=["POST"])
@@ -1266,6 +1392,7 @@ def api_chat(conv_id):
     model = request.form.get("model", MODEL_DEFAULT)
     user_override = request.form.get("model_override", "").strip().lower() in ("1", "true", "yes", "on")
     gost_mode = request.form.get("mode", "").strip()
+    normacs_requested = request.form.get("normacs", "1").strip().lower() in ("1", "true", "yes", "on")
     check_date = _parse_check_date(request.form.get("check_date"))
     file = request.files.get("file")
 
@@ -1300,6 +1427,25 @@ def api_chat(conv_id):
         question = GOST_DEFAULT_QUESTION
 
     profile = get_profile(model)
+
+    if _is_gost_check_request(question, gost_mode):
+        try:
+            job = _normative_jobs.create(conv_id)
+        except ValueError as exc:
+            os.unlink(tmp_path)
+            return {"error": str(exc)}, 409
+        try:
+            save_message(conv_id, "user", question, model, attachment_name=file_name)
+        except Exception:
+            _normative_jobs.discard(job)
+            os.unlink(tmp_path)
+            raise
+        app.logger.info("normative job started job=%s conversation=%s file=%s normacs=%s", job.id, conv_id, file_name, normacs_requested)
+        job.start(lambda: _normative_job_events(conv_id, tmp_path, file_name, ext, question, model, check_date,
+                                               normacs_requested=normacs_requested))
+        return Response(job.stream(), mimetype="text/event-stream", headers={
+            "Cache-Control": "no-cache, no-transform", "X-Accel-Buffering": "no",
+        })
 
     # Файл уже сохранён выше
 
@@ -1565,15 +1711,21 @@ def name_image():
 @app.route("/api/status")
 def api_status():
     from belener.config import stn_login, stn_lookup_enabled, stn_password
+    from belener.config import normacs_credentials, normacs_lookup_enabled
 
     login = stn_login()
     password = stn_password()
+    normacs = normacs_credentials()
     return jsonify(
         {
             "gost_only": True,
             "stn": {
                 "enabled": stn_lookup_enabled(),
                 "configured": bool(login and password),
+            },
+            "normacs": {
+                "enabled": normacs_lookup_enabled(),
+                "configured": bool(normacs.get("login") and normacs.get("password")),
             },
         }
     )

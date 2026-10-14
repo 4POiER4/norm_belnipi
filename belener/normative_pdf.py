@@ -78,6 +78,17 @@ def _compute_summary_from_rows(payload: dict[str, Any]) -> str:
     if not rows:
         return ""
     headers = [str(x or "") for x in (payload.get("headers") or [])]
+    normacs_only = any("normacs" in h.casefold() for h in headers) and not any(
+        "стройдок" in h.casefold() or "ипс" == h.casefold() for h in headers
+    )
+    if normacs_only:
+        link_col = next((i for i, h in enumerate(headers) if h.casefold() == "normacs"), -1)
+        status_col = next((i for i, h in enumerate(headers) if "статус" in h.casefold() and "normacs" in h.casefold()), -1)
+        found = sum(bool((row.get("cells") or [])[link_col].get("href")) for row in rows
+                    if 0 <= link_col < len(row.get("cells") or []))
+        active = sum(str((row.get("cells") or [])[status_col].get("text") or "").strip().casefold() == "действует"
+                     for row in rows if 0 <= status_col < len(row.get("cells") or []))
+        return f"Всего в документе: {len(rows)}; найдено в NormaCS: {found};\nдействует: {active}"
     has_tnpa = any("тнпа" in h.casefold() for h in headers)
     total = len(rows)
     found_ips = 0
@@ -141,6 +152,16 @@ def _parse_summary(summary: str) -> tuple[str, str, str, str]:
     if m2:
         return m2.group(1), m2.group(2), "", m2.group(3)
     return "", "", "", ""
+
+
+def _parse_normacs_summary(summary: str) -> tuple[str, str, str]:
+    import re
+
+    match = re.search(
+        r"Всего в документе:\s*(\d+);\s*найдено в NormaCS:\s*(\d+);\s*действует:\s*(\d+)",
+        summary or "", re.I,
+    )
+    return match.groups() if match else ("", "", "")
 
 
 def _sheet_from_meta(meta_lines: list[str]) -> str:
@@ -285,7 +306,14 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
         summary = _compute_summary_from_rows(payload)
 
     story = []
-    total, found_stn, found_tnpa, active = _parse_summary(summary)
+    raw_headers = [str(x or "—") for x in (payload.get("headers") or [])]
+    has_normacs_header = any("normacs" in h.casefold() for h in raw_headers)
+    normacs_only = has_normacs_header and not any("стройдок" in h.casefold() for h in raw_headers)
+    if normacs_only:
+        total, found_normacs, active = _parse_normacs_summary(summary)
+        found_stn = found_tnpa = ""
+    else:
+        total, found_stn, found_tnpa, active = _parse_summary(summary)
     file_name = next((x.split(":", 1)[1].strip() for x in meta_lines if x.startswith("Файл:")), "")
     sheet = _sheet_from_meta(meta_lines)
     check_date = next((x.split(":", 1)[1].strip() for x in meta_lines if x.startswith("Дата проверки актуальности:")), "")
@@ -319,8 +347,8 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
             Paragraph(_esc(file_name or "—"), info_file_style),
             Paragraph("<b>Листов</b>", info_label_style),
             Paragraph(f"<b>{_esc(sheet or '—')}</b>", info_value_style),
-            Paragraph("<b>Проверка</b>", info_label_style),
-            Paragraph(f"<b>{_esc(check_date or '—')}</b>", info_value_style),
+            Paragraph("<b>Статус</b>" if normacs_only else "<b>Проверка</b>", info_label_style),
+            Paragraph(f"<b>{_esc('Текущий' if normacs_only else check_date or '—')}</b>", info_value_style),
         ]],
         colWidths=info_col_widths,
     )
@@ -382,12 +410,12 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
             [
                 [
                     Paragraph(_esc("Найдено"), card_label_style),
-                    Paragraph(_esc("В Стройдок"), card_label_style),
-                    Paragraph(_esc("Актуально"), card_label_style),
+                    Paragraph(_esc("В NormaCS" if normacs_only else "В Стройдок"), card_label_style),
+                    Paragraph(_esc("Действует" if normacs_only else "Актуально"), card_label_style),
                 ],
                 [
                     Paragraph(f"<b>{_esc(total if total != '' else '—')}</b>", card_value_style),
-                    Paragraph(f"<b>{_esc(found_stn if found_stn != '' else '—')}</b>", card_value_style),
+                    Paragraph(f"<b>{_esc((found_normacs if normacs_only else found_stn) or '—')}</b>", card_value_style),
                     Paragraph(f"<b>{_esc(active if active != '' else '—')}</b>", card_value_style),
                 ],
             ],
@@ -408,11 +436,23 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
     stats_table.setStyle(TableStyle(stats_style))
     story.append(stats_table)
     story.append(Spacer(1, 5))
+    if normacs_only:
+        story.append(Paragraph(
+            "NormaCS: текущие статусы базы РФ; историческая дата проверки не применяется.", subtitle_style
+        ))
+        story.append(Spacer(1, 5))
+    elif has_normacs_header:
+        story.append(Paragraph(
+            "NormaCS: текущие статусы базы РФ; результаты Стройдока относятся к РБ. "
+            "Общий счётчик актуальных документов относится к Стройдоку.", subtitle_style
+        ))
+        story.append(Spacer(1, 5))
 
     # Канонические заголовки — не зависят от DOM/браузера клиента
-    raw_headers = [str(x or "—") for x in (payload.get("headers") or [])]
     has_tnpa_header = any("тнпа" in h.casefold() for h in raw_headers)
-    if has_tnpa_header or len(raw_headers) >= 5:
+    if has_normacs_header:
+        headers = raw_headers
+    elif has_tnpa_header or len(raw_headers) >= 5:
         headers = [
             "Обозначение",
             "Стройдок",
@@ -445,7 +485,7 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
             href = str(cell.get("href") or "").strip()
             if href:
                 text = f'<link href="{_esc(href)}" color="#1d4ed8">{text}</link>'
-            elif col_idx >= (3 if has_tnpa_header or len(headers) >= 5 else 2) and text not in ("—", "&mdash;"):
+            elif not has_normacs_header and col_idx >= (3 if has_tnpa_header or len(headers) >= 5 else 2) and text not in ("—", "&mdash;"):
                 text = f"<nobr>{text}</nobr>"
             cells.append(Paragraph(text, cell_style))
         # Выравниваем число колонок под заголовок
@@ -456,13 +496,17 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
             row_fills.append((idx, fill))
 
     # Эталонные ширины (как в рабочем PDF 279 mm): без redistrib по клиенту
-    if len(headers) == 5:
+    if normacs_only and len(headers) == 3:
+        widths_mm = [98.0, 34.0, 64.0]
+    elif has_normacs_header and len(headers) == 6:
+        widths_mm = [55.0, 26.0, 24.0, 24.0, 25.0, 42.0]
+    elif len(headers) == 5:
         widths_mm = [70.0, 24.0, 22.0, 40.0, 40.0]
     elif len(headers) == 4:
         widths_mm = [80.0, 30.0, 45.0, 45.0]
     else:
         widths_mm = [avail_w / mm / max(len(headers), 1)] * max(len(headers), 1)
-    if len(headers) in (4, 5):
+    if len(headers) in (4, 5) or has_normacs_header:
         scale = (avail_w / mm) / sum(widths_mm)
         widths_mm = [round(w * scale, 4) for w in widths_mm]
         # компенсация округления на последнюю колонку

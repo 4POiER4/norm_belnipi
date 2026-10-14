@@ -54,6 +54,27 @@ def test_format_header_html_two_lines_no_space():
     assert _format_header_html("Статус") == "Статус"
 
 
+def test_normacs_only_table_exports_without_stn_columns():
+    import fitz
+    from belener.normative_pdf import build_normative_pdf_bytes
+
+    payload = {
+        "title": "Таблица нормативов",
+        "headers": ["Обозначение", "NormaCS", "Статус NormaCS (РФ)"],
+        "summary": "Всего в документе: 1; найдено в NormaCS: 1; действует: 0",
+        "rows": [{"cells": [
+            {"text": "ГОСТ 21.101-97"},
+            {"text": "NormaCS", "href": "http://example.test/document/1/card"},
+            {"text": "Частично действует"},
+        ]}],
+    }
+    with fitz.open(stream=build_normative_pdf_bytes(payload), filetype="pdf") as doc:
+        exported = "\n".join(page.get_text() for page in doc)
+    assert "NormaCS" in exported
+    assert "Частично действует" in exported
+    assert "Стройдок" not in exported
+
+
 def test_pdf_column_widths_stable():
     """Ширины колонок фиксированы — одинаковый байтовый PDF при том же payload."""
     from belener.normative_pdf import build_normative_pdf_bytes

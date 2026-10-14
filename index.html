@@ -7,7 +7,9 @@
 <link rel="icon" type="image/png" href="/ico.png">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/static/style.css?v=47">
+  <link rel="stylesheet" href="/static/style.css?v=51">
+  <script>try{document.documentElement.dataset.theme=localStorage.getItem('belener-theme')==='dark'?'dark':'light';}catch(e){document.documentElement.dataset.theme='light';}</script>
+  <link rel="stylesheet" href="/static/review.css?v=3">
 </head>
 <body>
 
@@ -27,6 +29,7 @@
       </a>
     </div>
     <div class="topbar-right">
+      <button type="button" class="btn btn-sm theme-toggle" id="theme-toggle" aria-pressed="false">Тёмная тема</button>
       <button class="btn btn-primary btn-sm" onclick="newChat()">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
         Новый чат
@@ -67,7 +70,7 @@
             <div class="welcome-hero">
               <div class="welcome-badge">Локальная обработка · данные не уходят в облако</div>
               <h1 class="welcome-title">Проверка ГОСТ<br>на чертеже</h1>
-              <p class="welcome-sub">Загрузите PDF или скан листа — система найдёт ГОСТ, ОСТ, СТП, РД, СНиП, ТУ, ТКП, СТБ и др., затем проверит актуальность на normy.stn.by.</p>
+            <p class="welcome-sub">Загрузите PDF или скан листа — система найдёт нормативы и проверит их статус в NormaCS (РФ). Стройдок временно отключён.</p>
             </div>
 
             <div class="steps">
@@ -89,7 +92,7 @@
                 <div class="step-num">3</div>
                 <div class="step-body">
                   <div class="step-title">Проверка актуальности</div>
-                  <div class="step-desc">Сверка с базой normy.stn.by</div>
+                  <div class="step-desc">NormaCS · РФ</div>
                 </div>
               </div>
             </div>
@@ -124,10 +127,11 @@
           <div class="composer-card" id="input-box">
             <div class="composer-toolbar">
               <div class="toolbar-group">
-                <label class="form-field form-field-inline" for="check-date">
+                <label class="form-field form-field-inline" for="check-date" id="stn-check-date-field" hidden>
                   <span class="form-label">Дата проверки</span>
                   <input type="date" id="check-date" class="form-input check-date-input" title="Дата актуальности ГОСТ">
                 </label>
+                <span class="normacs-mode-badge" id="normacs-mode-badge">Проверка: NormaCS · РФ</span>
               </div>
               <div class="toolbar-hint">Перетащите файл в окно или нажмите «Прикрепить»</div>
             </div>
@@ -196,6 +200,7 @@
   </div>
 </div>
 
-<script src="/static/app.js?v=72"></script>
+  <script src="/static/review.js?v=3"></script>
+  <script src="/static/app.js?v=80"></script>
 </body>
 </html>

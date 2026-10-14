@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 import logging
+import json
 import os
 import re
 import uuid
+from html import escape
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -547,12 +549,16 @@ def _render_preview_image_with_highlights(
     rects: list[fitz.Rect],
     *,
     dpi: int = 144,
+    base_image=None,
 ):
     """JPEG-превью: жёлтые рамки рисуем поверх pixmap (надёжно на image-only PDF)."""
     from PIL import Image, ImageDraw
 
-    pix = page.get_pixmap(dpi=dpi, annots=False)
-    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    if base_image is None:
+        pix = page.get_pixmap(dpi=dpi, annots=False)
+        img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    else:
+        img = base_image
     if not rects:
         return img
     overlay = Image.new("RGBA", img.size, (0, 0, 0, 0))
@@ -562,6 +568,7 @@ def _render_preview_image_with_highlights(
     for rect in rects:
         if rect is None or rect.is_empty:
             continue
+        rect = rect * page.rotation_matrix
         fp = _rect_fingerprint(rect)
         if fp in seen:
             continue
@@ -642,6 +649,7 @@ def _collect_highlight_rects(
     doc: fitz.Document | None = None,
     page_index: int = 0,
     tile_zones: list | None = None,
+    mark_items: list[dict] | None = None,
 ) -> tuple[int, int, list[fitz.Rect]]:
     """Собрать все bbox для нормативов из таблицы ответа (только точечные)."""
     merged_words = _merge_word_sources(sources)
@@ -666,6 +674,19 @@ def _collect_highlight_rects(
             log.debug("preview highlight miss: %s", ref_str)
             continue
         highlighted_refs += 1
+        if mark_items is not None and page is not None:
+            bounds = page.rect
+            for rect in rects:
+                rotated = (rect * page.rotation_matrix) & bounds
+                if rotated.is_empty:
+                    continue
+                mark_items.append({
+                    "ref": ref_str,
+                    "x": round(100 * (rotated.x0 - bounds.x0) / bounds.width, 5),
+                    "y": round(100 * (rotated.y0 - bounds.y0) / bounds.height, 5),
+                    "w": round(100 * rotated.width / bounds.width, 5),
+                    "h": round(100 * rotated.height / bounds.height, 5),
+                })
         for rect in rects:
             fp = _rect_fingerprint(rect)
             if fp in seen_fp:
@@ -965,6 +986,7 @@ def generate_pdf_preview_pages_with_highlights(
             doc = fitz.open(pdf_path)
             try:
                 page = doc[page_index]
+                mark_items: list[dict] = []
                 sources: list[list] = []
                 for src in word_sources:
                     if src and src not in sources:
@@ -976,6 +998,7 @@ def generate_pdf_preview_pages_with_highlights(
                     doc=doc,
                     page_index=page_index,
                     tile_zones=tile_zones,
+                    mark_items=mark_items,
                 )
                 if total_marks == 0 and page_refs:
                     if pipeline_deadline is None or time.monotonic() < pipeline_deadline - 12.0:
@@ -983,6 +1006,7 @@ def generate_pdf_preview_pages_with_highlights(
                             extra = _fullpage_ocr_words(page, page_index=page_index)
                             if extra:
                                 sources.append(extra)
+                                mark_items.clear()
                                 highlighted_refs, total_marks, rects = _collect_highlight_rects(
                                     page,
                                     page_refs,
@@ -990,14 +1014,21 @@ def generate_pdf_preview_pages_with_highlights(
                                     doc=doc,
                                     page_index=page_index,
                                     tile_zones=tile_zones,
+                                    mark_items=mark_items,
                                 )
-                preview_img = _render_preview_image_with_highlights(page, rects, dpi=144)
+                plain_img = _render_preview_image_with_highlights(page, [], dpi=144)
+                preview_img = _render_preview_image_with_highlights(
+                    page, rects, dpi=144, base_image=plain_img
+                )
             finally:
                 doc.close()
 
             fname = f"preview_{uuid.uuid4().hex}.jpg"
             out_path = os.path.join(store_dir, fname)
             preview_img.save(out_path, format="JPEG", quality=92)
+            plain_fname = fname.replace(".jpg", "_plain.jpg")
+            if mark_items:
+                plain_img.save(os.path.join(store_dir, plain_fname), format="JPEG", quality=92)
             if not os.path.isfile(out_path):
                 continue
             pages_out.append(
@@ -1006,6 +1037,8 @@ def generate_pdf_preview_pages_with_highlights(
                     "url": f"/api/preview/{fname}",
                     "refs": highlighted_refs,
                     "marks": total_marks,
+                    "plain_url": f"/api/preview/{plain_fname}" if mark_items else f"/api/preview/{fname}",
+                    "highlights": mark_items,
                 }
             )
             log.debug(
@@ -1095,8 +1128,12 @@ def normative_refs_to_markdown(
     pipeline: str = "",
     include_context: bool = False,
     stn_checks: list | None = None,
+    include_stn: bool = True,
     tnpa_checks: list | None = None,
     include_tnpa: bool | None = None,
+    normacs_checks: list | None = None,
+    include_normacs: bool = False,
+    normacs_error: str = "",
     check_date: date | None = None,
     stn_error: str = "",
     tnpa_error: str = "",
@@ -1114,7 +1151,7 @@ def normative_refs_to_markdown(
 
     meta: list[str] = []
     if filename:
-        meta.append(f"<p><strong>Файл:</strong> {filename}</p>")
+        meta.append(f"<p><strong>Файл:</strong> {escape(filename)}</p>")
     if page_count > 0:
         meta.append(f"<p><strong>Листов:</strong> {page_count}</p>")
     if page_count > 1:
@@ -1141,6 +1178,8 @@ def normative_refs_to_markdown(
     found_tnpa = 0
     # Явно False — колонка скрыта (поиск ТНПА выключен). Иначе колонка есть.
     show_tnpa = True if include_tnpa is None else bool(include_tnpa)
+    show_stn = bool(include_stn)
+    show_normacs = bool(include_normacs or normacs_checks)
 
     if not refs:
         lines.append(
@@ -1151,6 +1190,15 @@ def normative_refs_to_markdown(
     else:
         checks_map = {}
         tnpa_checks_map = {}
+        normacs_checks_map = {
+            str(c.ref if hasattr(c, "ref") else c.get("ref") or ""): c
+            for c in (normacs_checks or [])
+        }
+        from belener.normacs_lookup import designation_key, normacs_query
+        for c in (normacs_checks or []):
+            nc_kind = str(c.kind if hasattr(c, "kind") else c.get("kind") or "")
+            nc_ref = str(c.ref if hasattr(c, "ref") else c.get("ref") or "")
+            normacs_checks_map[designation_key(normacs_query(nc_kind, nc_ref))] = c
         tnpa_base = "https://tnpa.by"
         if stn_checks:
             for c in stn_checks:
@@ -1189,10 +1237,21 @@ def normative_refs_to_markdown(
         found_ips = 0
         found_tnpa = 0
         active_count = 0
+        found_normacs = 0
 
         lines.append('<div class="normative-table-container">')
-        lines.append("<table>")
-        if show_tnpa:
+        lines.append('<table class="normative-table-normacs">' if show_normacs else "<table>")
+        if show_normacs:
+            titles = ["Обозначение"]
+            if show_stn:
+                titles.append("Стройдок")
+            if show_tnpa:
+                titles.append("ТНПА")
+            if show_stn:
+                titles.extend(["Введен (Стройдок)", "Отменен (Стройдок)"])
+            titles.extend(["NormaCS", "Статус NormaCS (РФ)"])
+            lines.append("<thead><tr>" + "".join(f"<th>{title}</th>" for title in titles))
+        elif show_tnpa and show_stn:
             lines.append(
                 "<colgroup>"
                 "<col style=\"width:280px\">"
@@ -1207,7 +1266,7 @@ def normative_refs_to_markdown(
                 "<th>Обозначение</th><th>Стройдок</th><th>ТНПА</th>"
                 "<th>Введен</th><th>Отменен</th>"
             )
-        else:
+        elif show_stn:
             lines.append(
                 "<colgroup>"
                 "<col style=\"width:320px\">"
@@ -1221,6 +1280,10 @@ def normative_refs_to_markdown(
                 "<th>Обозначение</th><th>Стройдок</th>"
                 "<th>Введен</th><th>Отменен</th>"
             )
+        elif show_tnpa:
+            lines.append('<thead><tr><th>Обозначение</th><th>ТНПА</th>')
+        else:
+            lines.append("<thead><tr><th>Обозначение</th>")
         lines.append("</tr></thead>")
         lines.append("<tbody>")
 
@@ -1259,7 +1322,7 @@ def normative_refs_to_markdown(
                 stn_intro = c.intro_date if hasattr(c, "intro_date") else c.get("intro_date") or "—"
                 stn_cancel = c.cancel_date if hasattr(c, "cancel_date") else c.get("cancel_date") or "—"
                 stn_status_val = c.status if hasattr(c, "status") else c.get("status") or ""
-                if stn_found and getattr(c, "doc_id", None):
+                if stn_found and (c.doc_id if hasattr(c, "doc_id") else c.get("doc_id")):
                     doc_id = c.doc_id if hasattr(c, "doc_id") else c.get("doc_id")
                     if doc_id:
                         ips_link = (
@@ -1317,10 +1380,20 @@ def normative_refs_to_markdown(
 
             stn_active = stn_found and stn_status_val == "актуален"
             tnpa_active = show_tnpa and tnpa_found and tnpa_status_val == "актуален"
-            if stn_active or tnpa_active:
+            nc = normacs_checks_map.get(str(ref)) if show_normacs else None
+            if show_normacs and nc is None:
+                nc = normacs_checks_map.get(designation_key(normacs_query(str(kind), str(ref))))
+            nc_id = str(getattr(nc, "status_id", "") if hasattr(nc, "status_id") else nc.get("status_id", "") if nc else "")
+            if not show_stn and not show_tnpa:
+                if nc_id == "1":
+                    row_class = ' class="row-active"'
+                    active_count += 1
+                elif nc_id == "0":
+                    row_class = ' class="row-canceled"'
+            elif stn_active or tnpa_active:
                 row_class = ' class="row-active"'
                 active_count += 1
-            else:
+            elif show_stn or show_tnpa:
                 row_class = ' class="row-canceled"'
 
             pages_attr = ""
@@ -1334,22 +1407,76 @@ def normative_refs_to_markdown(
                     row_class = row_class.replace('class="', 'class="row-jump ', 1)
                 pages_attr = f' data-preview-page="{pages_for_ref[0]}" data-preview-pages="{pages_csv}"{title}'
 
-            lines.append(f"<tr{row_class}{pages_attr}>")
-            if show_tnpa:
+            def stn_value(key):
+                return str(getattr(c, key, "") if hasattr(c, key) else c.get(key, "") if c else "")
+            review_attrs = (
+                f' data-normative-ref="{escape(str(ref), quote=True)}"'
+                f' data-stn-status="{escape(stn_status_val, quote=True)}"'
+                f' data-stn-found="{int(stn_found)}"'
+                f' data-stn-enabled="{int(show_stn)}"'
+                f' data-normative-title="{escape(stn_value("stn_name"), quote=True)}"'
+                f' data-stn-error="{escape(stn_value("error"), quote=True)}"'
+            )
+            lines.append(f"<tr{row_class}{pages_attr}{review_attrs}>")
+            if show_stn and show_tnpa:
                 lines.append(
-                    f"<td>{ref}</td><td>{ips_link}</td><td>{tnpa_link}</td>"
+                    f"<td>{escape(str(ref))}</td><td>{ips_link}</td><td>{tnpa_link}</td>"
                     f"<td>{intro}</td><td>{cancel}</td>"
                 )
+            elif show_stn:
+                lines.append(
+                    f"<td>{escape(str(ref))}</td><td>{ips_link}</td>"
+                    f"<td>{intro}</td><td>{cancel}</td>"
+                )
+            elif show_tnpa:
+                lines.append(f"<td>{escape(str(ref))}</td><td>{tnpa_link}</td>")
             else:
-                lines.append(
-                    f"<td>{ref}</td><td>{ips_link}</td>"
-                    f"<td>{intro}</td><td>{cancel}</td>"
-                )
+                lines.append(f"<td>{escape(str(ref))}</td>")
+            if show_normacs:
+                def nc_value(key, default=""):
+                    return (getattr(nc, key, default) if hasattr(nc, key)
+                            else nc.get(key, default) if nc else default)
+                nc_link = "—"
+                nc_status = str(nc_value("status") or "Не проверен")
+                if nc_value("found") in (True, "1"):
+                    found_normacs += 1
+                    nc_url = str(nc_value("url"))
+                    if nc_url.startswith(("http://", "https://")):
+                        nc_link = (f'<a class="stn-link normacs-link" href="{escape(nc_url, quote=True)}" '
+                                   'target="_blank" rel="noopener noreferrer">NormaCS</a>')
+                nc_hint = str(nc_value("error") or nc_value("status_hint") or nc_status)
+                history = nc_value("status_history") or []
+                if history:
+                    nc_hint += "\n" + "\n".join(str(x) for x in history)
+                nc_label = escape(nc_status)
+                if nc_value("error"):
+                    # Причина видна в таблице и попадает в PDF, а не только
+                    # в title, который недоступен на телефонах/в экспорте.
+                    nc_label += f'<br><small class="normacs-error-detail">{escape(str(nc_value("error")))}</small>'
+                if nc_value("intro_date"):
+                    nc_label += f'<br><small>Введен: {escape(str(nc_value("intro_date")))}</small>'
+                nc_id = str(nc_value("status_id"))
+                nc_class = f"normacs-status-{nc_id}" if nc_id in ("0", "1", "2", "4", "8") else ""
+                lines.append(f'<td>{nc_link}</td><td class="normacs-status {nc_class}" '
+                             f'title="{escape(nc_hint, quote=True)}">{nc_label}</td>')
             lines.append("</tr>")
 
         lines.append("</tbody></table>")
         lines.append("</div>")
         lines.append("")
+
+        if show_normacs:
+            lines.append(f'<p>Найдено в NormaCS: {found_normacs} из {len(refs)}. '
+                         'Статусы NormaCS относятся к РФ и показаны по текущей карточке базы. '
+                         'История и условия применения доступны при наведении на статус и в карточке.</p>')
+            failed_checks = [c for c in (normacs_checks or [])
+                             if (getattr(c, "error", "") if hasattr(c, "error") else c.get("error"))]
+            if failed_checks:
+                reasons = list(dict.fromkeys(str(getattr(c, "error", "") if hasattr(c, "error")
+                                                 else c.get("error")) for c in failed_checks))
+                lines.append(f'<p class="normacs-warning">⚠ NormaCS: не удалось проверить '
+                             f'{len(failed_checks)} обозначений. Это не означает отсутствие или отмену документов. '
+                             f'{escape("; ".join(reasons[:3]))}</p>')
         lines.append(
             '<button type="button" class="btn btn-primary btn-sm normative-table-pdf-btn" '
             'style="margin-top:10px" '
@@ -1358,10 +1485,20 @@ def normative_refs_to_markdown(
         )
         lines.append("")
 
-        if show_tnpa:
+        if not show_stn and show_normacs and not show_tnpa:
+            lines.append(
+                f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; '
+                f'найдено в NormaCS: {found_normacs};<br>действует: {active_count}</em></p>'
+            )
+        elif show_tnpa and show_stn:
             lines.append(
                 f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; найдено в Стройдок: {found_ips}; '
                 f"найдено в ТНПА: {found_tnpa};<br>актуально: {active_count}</em></p>"
+            )
+        elif show_tnpa:
+            lines.append(
+                f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; '
+                f'найдено в ТНПА: {found_tnpa};<br>актуально: {active_count}</em></p>'
             )
         else:
             lines.append(
@@ -1370,7 +1507,7 @@ def normative_refs_to_markdown(
             )
         lines.append("")
 
-    stn_error = (stn_error or "").strip()
+    stn_error = (stn_error or "").strip() if show_stn else ""
     if stn_checks and not stn_error:
         login_like = sum(
             1
@@ -1414,6 +1551,9 @@ def normative_refs_to_markdown(
                     )
     if stn_error:
         lines.extend(["", f"<p><em>⚠ {stn_error}</em></p>", ""])
+
+    if normacs_error:
+        lines.extend(["", f"<p><em>⚠ {escape(normacs_error)}</em></p>", ""])
 
     tnpa_error = (tnpa_error or "").strip()
     if show_tnpa and not tnpa_error and tnpa_checks:
@@ -1468,6 +1608,8 @@ def normative_refs_to_markdown(
         for i, entry in enumerate(usable):
             page_no = int(entry.get("page") or 0)
             preview_url = str(entry.get("url") or "")
+            plain_url = str(entry.get("plain_url") or preview_url)
+            highlights = list(entry.get("highlights") or [])
             preview_id = f"preview-{uuid.uuid4().hex[:8]}"
             active = " is-active" if i == 0 else ""
             hidden = "" if i == 0 else " hidden"
@@ -1484,9 +1626,14 @@ def normative_refs_to_markdown(
                 f'<button type="button" class="preview-zoom-btn" data-target="{preview_id}" data-action="in" aria-label="Увеличить">+</button>'
                 f'</div></div>'
             )
+            marks_attr = escape(json.dumps(highlights, ensure_ascii=False), quote=True)
             lines.append(
-                f'<div class="pdf-preview-container"><img id="{preview_id}" src="{preview_url}" '
-                f'alt="Предпросмотр листа {page_no}" class="pdf-preview-img" data-scale="1"></div>'
+                f'<div class="pdf-preview-container" data-review-marks="{marks_attr}" '
+                f'data-interactive-highlights="{int(bool(highlights and entry.get("plain_url")))}">'
+                f'<img id="{preview_id}" src="{escape(plain_url, quote=True)}" '
+                f'alt="Предпросмотр листа {page_no}" class="pdf-preview-img" '
+                f'loading="{"eager" if i == 0 else "lazy"}" decoding="async" '
+                f'data-highlight-url="{escape(preview_url, quote=True)}" data-scale="1"></div>'
             )
             lines.append("</div>")
         lines.append("</div>")  # shell
@@ -1507,6 +1654,7 @@ def normative_result_to_markdown(
     *,
     include_context: bool = False,
     stn_checks: list | None = None,
+    include_stn: bool | None = None,
     tnpa_checks: list | None = None,
     include_tnpa: bool | None = None,
     check_date: date | None = None,
@@ -1522,16 +1670,21 @@ def normative_result_to_markdown(
     show_tnpa = include_tnpa
     if show_tnpa is None:
         show_tnpa = True
+    show_stn = bool(result.get("stn_enabled", True)) if include_stn is None else bool(include_stn)
     return normative_refs_to_markdown(
         list(result.get("normative_refs") or []),
         filename=str(result.get("filename") or ""),
         pipeline=str(result.get("pipeline") or ""),
         include_context=include_context,
         stn_checks=checks,
+        include_stn=show_stn,
         tnpa_checks=tnpa if show_tnpa else None,
         include_tnpa=bool(show_tnpa),
+        normacs_checks=result.get("normacs_checks"),
+        include_normacs=bool(result.get("normacs_requested", result.get("normacs_enabled"))),
+        normacs_error=str(result.get("normacs_error") or ""),
         check_date=check_date,
-        stn_error=str(result.get("stn_error") or ""),
+        stn_error=str(result.get("stn_error") or "") if show_stn else "",
         tnpa_error=str(result.get("tnpa_error") or "") if show_tnpa else "",
         page_count=int(result.get("page_count") or 0),
         pages_processed=int(result.get("pages_processed") or 0),
