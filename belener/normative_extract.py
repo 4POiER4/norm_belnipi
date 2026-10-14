@@ -15,6 +15,7 @@ from typing import Any
 import fitz
 
 from belener.normative_crops import extract_normatives_document_crops
+from belener.status_merge import combined_verdict, normacs_state, stn_state
 from belener.config import preview_store_dir, prune_preview_store
 from belener.normative_refs import (
     _phrase_matches_highlight_ref,
@@ -1238,6 +1239,8 @@ def normative_refs_to_markdown(
         found_tnpa = 0
         active_count = 0
         found_normacs = 0
+        partial_count = 0
+        conflict_count = 0
 
         lines.append('<div class="normative-table-container">')
         lines.append('<table class="normative-table-normacs">' if show_normacs else "<table>")
@@ -1318,7 +1321,8 @@ def normative_refs_to_markdown(
             tnpa_status_val = ""
 
             if c:
-                stn_found = bool(c.found) if hasattr(c, "found") else str(c.get("found")) == "1"
+                raw_stn_found = c.found if hasattr(c, "found") else c.get("found")
+                stn_found = raw_stn_found in (True, "1")
                 stn_intro = c.intro_date if hasattr(c, "intro_date") else c.get("intro_date") or "—"
                 stn_cancel = c.cancel_date if hasattr(c, "cancel_date") else c.get("cancel_date") or "—"
                 stn_status_val = c.status if hasattr(c, "status") else c.get("status") or ""
@@ -1383,18 +1387,41 @@ def normative_refs_to_markdown(
             nc = normacs_checks_map.get(str(ref)) if show_normacs else None
             if show_normacs and nc is None:
                 nc = normacs_checks_map.get(designation_key(normacs_query(str(kind), str(ref))))
-            nc_id = str(getattr(nc, "status_id", "") if hasattr(nc, "status_id") else nc.get("status_id", "") if nc else "")
-            if not show_stn and not show_tnpa:
-                if nc_id == "1":
+
+            def nc_value(key, default=""):
+                return (getattr(nc, key, default) if hasattr(nc, key)
+                        else nc.get(key, default) if nc else default)
+
+            def stn_value(key):
+                return str(getattr(c, key, "") if hasattr(c, key) else c.get(key, "") if c else "")
+
+            nc_found = nc_value("found") in (True, "1")
+            nc_id = str(nc_value("status_id"))
+            stn_result = stn_state(enabled=show_stn, found=stn_found,
+                                   status=stn_status_val, error=stn_value("error"))
+            nc_result = normacs_state(enabled=show_normacs, found=nc_found,
+                                      status_id=nc_id, status=str(nc_value("status")),
+                                      error=str(nc_value("error")))
+            verdict = combined_verdict(stn_result, nc_result)
+            if show_tnpa:
+                # Старые отчёты ТНПА сохраняют собственную схему.
+                if stn_active or tnpa_active:
                     row_class = ' class="row-active"'
                     active_count += 1
-                elif nc_id == "0":
+                elif show_stn or show_tnpa:
                     row_class = ' class="row-canceled"'
-            elif stn_active or tnpa_active:
-                row_class = ' class="row-active"'
-                active_count += 1
-            elif show_stn or show_tnpa:
-                row_class = ' class="row-canceled"'
+            else:
+                row_class = {
+                    "active": ' class="row-active"',
+                    "inactive": ' class="row-canceled"',
+                    "partial": ' class="row-warn"',
+                    "upcoming": ' class="row-warn"',
+                }.get(verdict.state, "")
+                if verdict.state == "unknown" and verdict.tone == "warn":
+                    row_class = ' class="row-warn"'
+                active_count += verdict.state == "active"
+                partial_count += verdict.state == "partial"
+                conflict_count += verdict.conflict
 
             pages_attr = ""
             pages_for_ref = ref_pages.get(str(ref), [])
@@ -1407,17 +1434,36 @@ def normative_refs_to_markdown(
                     row_class = row_class.replace('class="', 'class="row-jump ', 1)
                 pages_attr = f' data-preview-page="{pages_for_ref[0]}" data-preview-pages="{pages_csv}"{title}'
 
-            def stn_value(key):
-                return str(getattr(c, key, "") if hasattr(c, key) else c.get(key, "") if c else "")
+            combined_attrs = (
+                f' data-stn-state="{stn_result}"'
+                f' data-normacs-state="{nc_result}"'
+                f' data-overall-label="{escape(verdict.label, quote=True)}"'
+                f' data-overall-tone="{verdict.tone}"'
+                f' data-overall-note="{escape(verdict.note, quote=True)}"'
+                f' data-overall-conflict="{int(verdict.conflict)}"'
+            ) if not show_tnpa else ""
             review_attrs = (
                 f' data-normative-ref="{escape(str(ref), quote=True)}"'
                 f' data-stn-status="{escape(stn_status_val, quote=True)}"'
                 f' data-stn-found="{int(stn_found)}"'
                 f' data-stn-enabled="{int(show_stn)}"'
+                f'{combined_attrs}'
                 f' data-normative-title="{escape(stn_value("stn_name"), quote=True)}"'
                 f' data-stn-error="{escape(stn_value("error"), quote=True)}"'
             )
             lines.append(f"<tr{row_class}{pages_attr}{review_attrs}>")
+            ref_cell = escape(str(ref))
+            stn_cell = ips_link
+            if show_normacs and not show_tnpa:
+                ref_cell += (f'<br><small class="normative-row-verdict">'
+                             f'{escape(verdict.label)}</small>')
+                if verdict.conflict:
+                    ref_cell += '<br><small class="normative-row-conflict">⚠ Реестры расходятся</small>'
+                if show_stn:
+                    stn_short = {"active": "Действует", "inactive": "Не действует",
+                                 "upcoming": "Не введён", "missing": "Не найден",
+                                 "error": "Ошибка", "unknown": "Не определён"}.get(stn_result, "")
+                    stn_cell += f'<br><small title="{escape(stn_status_val, quote=True)}">{stn_short}</small>'
             if show_stn and show_tnpa:
                 lines.append(
                     f"<td>{escape(str(ref))}</td><td>{ips_link}</td><td>{tnpa_link}</td>"
@@ -1425,20 +1471,17 @@ def normative_refs_to_markdown(
                 )
             elif show_stn:
                 lines.append(
-                    f"<td>{escape(str(ref))}</td><td>{ips_link}</td>"
+                    f"<td>{ref_cell}</td><td class=\"stn-source-cell stn-state-{stn_result}\">{stn_cell}</td>"
                     f"<td>{intro}</td><td>{cancel}</td>"
                 )
             elif show_tnpa:
                 lines.append(f"<td>{escape(str(ref))}</td><td>{tnpa_link}</td>")
             else:
-                lines.append(f"<td>{escape(str(ref))}</td>")
+                lines.append(f"<td>{ref_cell}</td>")
             if show_normacs:
-                def nc_value(key, default=""):
-                    return (getattr(nc, key, default) if hasattr(nc, key)
-                            else nc.get(key, default) if nc else default)
                 nc_link = "—"
                 nc_status = str(nc_value("status") or "Не проверен")
-                if nc_value("found") in (True, "1"):
+                if nc_found:
                     found_normacs += 1
                     nc_url = str(nc_value("url"))
                     if nc_url.startswith(("http://", "https://")):
@@ -1452,9 +1495,9 @@ def normative_refs_to_markdown(
                 if nc_value("error"):
                     # Причина видна в таблице и попадает в PDF, а не только
                     # в title, который недоступен на телефонах/в экспорте.
-                    nc_label += f'<br><small class="normacs-error-detail">{escape(str(nc_value("error")))}</small>'
+                    nc_label += f' <br><small class="normacs-error-detail">{escape(str(nc_value("error")))}</small>'
                 if nc_value("intro_date"):
-                    nc_label += f'<br><small>Введен: {escape(str(nc_value("intro_date")))}</small>'
+                    nc_label += f' <br><small>Введен: {escape(str(nc_value("intro_date")))}</small>'
                 nc_id = str(nc_value("status_id"))
                 nc_class = f"normacs-status-{nc_id}" if nc_id in ("0", "1", "2", "4", "8") else ""
                 lines.append(f'<td>{nc_link}</td><td class="normacs-status {nc_class}" '
@@ -1469,6 +1512,11 @@ def normative_refs_to_markdown(
             lines.append(f'<p>Найдено в NormaCS: {found_normacs} из {len(refs)}. '
                          'Статусы NormaCS относятся к РФ и показаны по текущей карточке базы. '
                          'История и условия применения доступны при наведении на статус и в карточке.</p>')
+            if show_stn:
+                lines.append('<p>Зелёный итог означает «действует хотя бы по одному реестру», '
+                             'но не подтверждает применимость в другой стране. Стройдок относится к РБ '
+                             'и проверяется на выбранную дату, NormaCS показывает текущий статус РФ. '
+                             'Расхождения отмечены отдельно; «не найден» и ошибка не означают отмену.</p>')
             failed_checks = [c for c in (normacs_checks or [])
                              if (getattr(c, "error", "") if hasattr(c, "error") else c.get("error"))]
             if failed_checks:
@@ -1485,7 +1533,14 @@ def normative_refs_to_markdown(
         )
         lines.append("")
 
-        if not show_stn and show_normacs and not show_tnpa:
+        if show_stn and show_normacs and not show_tnpa:
+            lines.append(
+                f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; '
+                f'найдено в Стройдок: {found_ips}; найдено в NormaCS: {found_normacs};<br>'
+                f'действует хотя бы в одном: {active_count}; частично: {partial_count}; '
+                f'расхождения: {conflict_count}</em></p>'
+            )
+        elif not show_stn and show_normacs and not show_tnpa:
             lines.append(
                 f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; '
                 f'найдено в NormaCS: {found_normacs};<br>действует: {active_count}</em></p>'

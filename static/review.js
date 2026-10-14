@@ -17,6 +17,7 @@ function reviewStatus(status, found, legacyActive = false) {
   const value = String(status || '').trim().toLowerCase();
   if ((found && value === 'актуален') || (!value && legacyActive)) return {label: 'Действует', tone: 'good'};
   if (found && /^(отмен[её]н|не действует)/.test(value)) return {label: 'Не действует', tone: 'bad'};
+  if (found && /^не введ[её]н/.test(value)) return {label: 'Не введён', tone: 'warn'};
   if (found && /^замен/.test(value)) return {label: 'Заменён', tone: 'warn'};
   if (/ошиб|нет связи|вход|ips|пропущ/.test(value)) return {label: 'Не проверен', tone: 'warn'};
   if (/нет в|не найден/.test(value)) return {label: 'Не найден в реестре', tone: 'neutral'};
@@ -56,11 +57,16 @@ function reviewReadRecords(workspace) {
       : ncCell?.classList.contains('normacs-status-0') ? 'bad'
       : /не найден/i.test(ncFirst) ? 'neutral' : ncCell ? 'warn' : 'neutral';
     const ncStatus = ncFirst || (ncColumn >= 0 ? 'Не проверен' : 'Не запрошен');
-    const status = stnPresent
+    const stnStatus = stnPresent
       ? reviewStatus(row.dataset.stnStatus, found, !modern && row.classList.contains('row-active'))
-      : {label: ncStatus, tone: ncTone};
+      : null;
+    const status = row.dataset.overallLabel
+      ? {label: row.dataset.overallLabel, tone: row.dataset.overallTone || 'neutral'}
+      : stnStatus || {label: ncStatus, tone: ncTone};
     return {index, row, stnPresent, ref: row.dataset.normativeRef || cell(0), title: row.dataset.normativeTitle || '',
-      status, error: row.dataset.stnError || cells[1]?.querySelector('[title]')?.title || '',
+      status, stnStatus, overallNote: row.dataset.overallNote || '',
+      conflict: row.dataset.overallConflict === '1',
+      error: row.dataset.stnError || cells[1]?.querySelector('[title]')?.title || '',
       intro: cell(introduced), cancel: cell(canceled),
       pages: (row.dataset.previewPages || row.dataset.previewPage || '').split(',').map(Number).filter(p => Number.isInteger(p) && p > 0),
       stnLink: stnPresent ? cells[1]?.querySelector('a') : null,
@@ -107,8 +113,9 @@ function initReviewWorkspace(workspace) {
     const meta = reviewElement('span', 'review-item-meta');
     meta.append(reviewElement('span', `review-status ${record.status.tone}`, record.status.label),
       reviewElement('span', 'review-pages-count', record.pages.length ? `Листы ${record.pages.join(', ')}` : 'Лист не определён'));
+    if (record.conflict) meta.append(reviewElement('span', 'review-status warn', '⚠ Реестры расходятся'));
     card.append(name, meta, reviewElement('span', 'review-item-source', record.stnPresent
-      ? `РБ · Стройдок${record.ncStatus !== 'Не запрошен' ? ' / РФ: '+record.ncStatus : ''}`
+      ? `РБ: ${record.stnStatus.label}${record.ncStatus !== 'Не запрошен' ? ' · РФ: '+record.ncStatus : ''}`
       : 'РФ · NormaCS'));
     list.append(card);
   });
@@ -185,9 +192,11 @@ function selectReviewRecord(workspace, index, jump = true) {
   const detail = model.detail; detail.replaceChildren();
   detail.append(reviewElement('div', 'review-detail-eyebrow', 'Выбранный норматив'),
     reviewElement('h3', '', record.ref), reviewElement('p', 'review-detail-title', record.title || 'Обозначение из загруженного документа'));
+  detail.append(reviewElement('span', `review-status ${record.status.tone}`, record.status.label));
+  if (record.overallNote) detail.append(reviewElement('p', record.conflict ? 'review-error' : 'review-note', record.overallNote));
   if (record.stnPresent) {
     const rb = reviewElement('section', 'review-source');
-    const rbHead = reviewElement('div', 'review-source-head'); rbHead.append(reviewElement('span', '', 'Стройдок · РБ'), reviewElement('span', `review-status ${record.status.tone}`, record.status.label));
+    const rbHead = reviewElement('div', 'review-source-head'); rbHead.append(reviewElement('span', '', 'Стройдок · РБ'), reviewElement('span', `review-status ${record.stnStatus.tone}`, record.stnStatus.label));
     rb.append(rbHead, reviewElement('p', '', 'Введён: '+record.intro), reviewElement('p', '', 'Отменён: '+record.cancel));
     if (record.error) rb.append(reviewElement('p', 'review-error', record.error));
     const rbLink = reviewSourceLink(record.stnLink); if (rbLink) rb.append(rbLink);
@@ -240,8 +249,9 @@ function focusReviewHighlight(workspace) {
   const y = (parseFloat(hit.style.top) + parseFloat(hit.style.height) / 2) / 100;
   setPreviewZoom(img, Math.max(3, Number(img.dataset.scale || 1)), null);
   const bounds = img.getBoundingClientRect();
-  box.scrollLeft = x * bounds.width - box.clientWidth / 2;
-  box.scrollTop = y * bounds.height - box.clientHeight / 2;
+  const boxBounds = box.getBoundingClientRect();
+  box.scrollLeft += bounds.left - boxBounds.left + x * bounds.width - box.clientWidth / 2;
+  box.scrollTop += bounds.top - boxBounds.top + y * bounds.height - box.clientHeight / 2;
 }
 
 function updateReviewOverlay(img) {

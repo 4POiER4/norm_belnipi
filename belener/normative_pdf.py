@@ -78,6 +78,18 @@ def _compute_summary_from_rows(payload: dict[str, Any]) -> str:
     if not rows:
         return ""
     headers = [str(x or "") for x in (payload.get("headers") or [])]
+    has_normacs = any("normacs" in h.casefold() for h in headers)
+    has_stn = any("стройдок" in h.casefold() for h in headers)
+    if has_normacs and has_stn and payload.get("combined"):
+        stn_col = next((i for i, h in enumerate(headers) if h.casefold() == "стройдок"), -1)
+        nc_col = next((i for i, h in enumerate(headers) if h.casefold() == "normacs"), -1)
+        found_stn = sum(bool((row.get("cells") or [])[stn_col].get("href")) for row in rows
+                        if 0 <= stn_col < len(row.get("cells") or []))
+        found_nc = sum(bool((row.get("cells") or [])[nc_col].get("href")) for row in rows
+                       if 0 <= nc_col < len(row.get("cells") or []))
+        active = sum(row.get("fill") == "active" for row in rows)
+        return (f"Всего в документе: {len(rows)}; найдено в Стройдок: {found_stn}; "
+                f"найдено в NormaCS: {found_nc};\nдействует хотя бы в одном: {active}")
     normacs_only = any("normacs" in h.casefold() for h in headers) and not any(
         "стройдок" in h.casefold() or "ипс" == h.casefold() for h in headers
     )
@@ -86,7 +98,7 @@ def _compute_summary_from_rows(payload: dict[str, Any]) -> str:
         status_col = next((i for i, h in enumerate(headers) if "статус" in h.casefold() and "normacs" in h.casefold()), -1)
         found = sum(bool((row.get("cells") or [])[link_col].get("href")) for row in rows
                     if 0 <= link_col < len(row.get("cells") or []))
-        active = sum(str((row.get("cells") or [])[status_col].get("text") or "").strip().casefold() == "действует"
+        active = sum(str((row.get("cells") or [])[status_col].get("text") or "").strip().casefold().startswith("действует")
                      for row in rows if 0 <= status_col < len(row.get("cells") or []))
         return f"Всего в документе: {len(rows)}; найдено в NormaCS: {found};\nдействует: {active}"
     has_tnpa = any("тнпа" in h.casefold() for h in headers)
@@ -162,6 +174,15 @@ def _parse_normacs_summary(summary: str) -> tuple[str, str, str]:
         summary or "", re.I,
     )
     return match.groups() if match else ("", "", "")
+
+
+def _parse_mixed_summary(summary: str) -> tuple[str, str, str, str, str, str]:
+    import re
+
+    patterns = (r"Всего в документе:\s*(\d+)", r"найдено в Стройдок:\s*(\d+)",
+                r"найдено в NormaCS:\s*(\d+)", r"действует хотя бы в одном:\s*(\d+)",
+                r"частично:\s*(\d+)", r"расхождения:\s*(\d+)")
+    return tuple((m.group(1) if (m := re.search(p, summary or "", re.I)) else "") for p in patterns)
 
 
 def _sheet_from_meta(meta_lines: list[str]) -> str:
@@ -309,7 +330,14 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
     raw_headers = [str(x or "—") for x in (payload.get("headers") or [])]
     has_normacs_header = any("normacs" in h.casefold() for h in raw_headers)
     normacs_only = has_normacs_header and not any("стройдок" in h.casefold() for h in raw_headers)
-    if normacs_only:
+    mixed_normacs = (has_normacs_header and not normacs_only
+                     and any("стройдок" in h.casefold() for h in raw_headers)
+                     and (payload.get("combined") or "действует хотя бы в одном" in summary.casefold()))
+    partial = conflicts = ""
+    if mixed_normacs:
+        total, found_stn, found_normacs, active, partial, conflicts = _parse_mixed_summary(summary)
+        found_tnpa = ""
+    elif normacs_only:
         total, found_normacs, active = _parse_normacs_summary(summary)
         found_stn = found_tnpa = ""
     else:
@@ -367,7 +395,7 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
     show_tnpa_stats = found_tnpa != "" or any(
         "тнпа" in str(h or "").casefold() for h in (payload.get("headers") or [])
     )
-    if show_tnpa_stats:
+    if show_tnpa_stats or mixed_normacs:
         stat_w1 = avail_w / 4.0
         stat_w2 = avail_w / 4.0
         stat_w3 = avail_w / 4.0
@@ -377,13 +405,13 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
                 [
                     Paragraph(_esc("Найдено"), card_label_style),
                     Paragraph(_esc("В Стройдок"), card_label_style),
-                    Paragraph(_esc("В ТНПА"), card_label_style),
-                    Paragraph(_esc("Актуально"), card_label_style),
+                    Paragraph(_esc("В NormaCS" if mixed_normacs else "В ТНПА"), card_label_style),
+                    Paragraph(_esc("Действует в ≥1" if mixed_normacs else "Актуально"), card_label_style),
                 ],
                 [
                     Paragraph(f"<b>{_esc(total if total != '' else '—')}</b>", card_value_style),
                     Paragraph(f"<b>{_esc(found_stn if found_stn != '' else '—')}</b>", card_value_style),
-                    Paragraph(f"<b>{_esc(found_tnpa if found_tnpa != '' else '—')}</b>", card_value_style),
+                    Paragraph(f"<b>{_esc((found_normacs if mixed_normacs else found_tnpa) or '—')}</b>", card_value_style),
                     Paragraph(f"<b>{_esc(active if active != '' else '—')}</b>", card_value_style),
                 ],
             ],
@@ -441,10 +469,22 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
             "NormaCS: текущие статусы базы РФ; историческая дата проверки не применяется.", subtitle_style
         ))
         story.append(Spacer(1, 5))
+    elif mixed_normacs:
+        story.append(Paragraph(
+            "NormaCS: текущие статусы базы РФ; результаты Стройдока относятся к РБ. "
+            "Зелёный итог означает действие хотя бы по одному реестру и не подтверждает "
+            "применимость в другой стране. Расхождения показаны в строках.", subtitle_style
+        ))
+        story.append(Spacer(1, 5))
+        if partial or conflicts:
+            story.append(Paragraph(
+                f"Частично действует: {_esc(partial or '0')}; расхождения: {_esc(conflicts or '0')}.",
+                subtitle_style))
+            story.append(Spacer(1, 5))
     elif has_normacs_header:
         story.append(Paragraph(
             "NormaCS: текущие статусы базы РФ; результаты Стройдока относятся к РБ. "
-            "Общий счётчик актуальных документов относится к Стройдоку.", subtitle_style
+            "В старом отчёте цвет и счётчик актуальных документов относятся к Стройдоку.", subtitle_style
         ))
         story.append(Spacer(1, 5))
 
@@ -542,6 +582,7 @@ def build_normative_pdf_bytes(payload: dict[str, Any]) -> bytes:
         "active": c_row_active,
         "canceled": c_row_canceled,
         "replaced": c_row_replaced,
+        "warn": c_row_replaced,
     }
     styled: set[int] = set()
     for row_idx, fill in row_fills:

@@ -7,6 +7,7 @@ let _modelMap = {}; // id → label
 let userScrolled = false;
 let currentPreviewUrl = '';
 let lastRetryRequest = null;
+let currentRegistryStatus = null;
 const GOST_DEFAULT_QUESTION = 'Проверка ГОСТ на листе';
 const DRAWING_FILE_RE = /\.(pdf|png|jpe?g|bmp|gif|webp|tiff?)$/i;
 
@@ -290,6 +291,7 @@ function _normativeRowFillColor(tr) {
   if (!cls) return null;
   if (cls.contains('row-active')) return '#e8f5ec';
   if (cls.contains('row-canceled')) return '#fce9ea';
+  if (cls.contains('row-warn')) return '#fff4d6';
   return null;
 }
 
@@ -298,7 +300,13 @@ function _cellBold(td) {
 }
 
 function _cellText(td) {
-  const t = (td && td.textContent) ? td.textContent : '';
+  if (!td) return '—';
+  // textContent склеивает текст через <br> (например, «Частично действуетВведен»).
+  const t = td.childNodes ? [...td.childNodes].map(node => {
+    if (node.nodeType === 1 && node.tagName === 'BR') return ' ';
+    if (node.nodeType === 1 && node.tagName === 'SMALL') return ` ${node.textContent} `;
+    return node.textContent || '';
+  }).join('') : (td.textContent || '');
   return String(t || '').replace(/\s+/g, ' ').trim() || '—';
 }
 
@@ -416,11 +424,13 @@ function buildNormativeTablePdfPayload(workspaceEl) {
       ? 'active'
       : tr.classList.contains('row-canceled')
         ? 'canceled'
+        : tr.classList.contains('row-warn')
+          ? 'warn'
         : '',
     cells: [...tr.querySelectorAll('td')].map(td => {
       const a = td.querySelector('a.stn-link[href]');
       return {
-        text: a ? (a.textContent.trim() || _cellText(td)) : _cellText(td),
+        text: _cellText(td),
         href: a ? a.href : '',
         bold: _cellBold(td),
       };
@@ -460,8 +470,17 @@ function buildNormativeTablePdfPayload(workspaceEl) {
     const ncLinkIndex = headers.findIndex(h => /^normacs$/i.test(h));
     const ncStatusIndex = headers.findIndex(h => /статус.*normacs/i.test(h));
     const found = rows.filter(r => r.cells[ncLinkIndex]?.href).length;
-    const active = rows.filter(r => /^действует$/i.test(r.cells[ncStatusIndex]?.text || '')).length;
+    const active = rows.filter(r => /^действует(?:\s|$)/i.test(r.cells[ncStatusIndex]?.text || '')).length;
     summary = `Всего в документе: ${rows.length}; найдено в NormaCS: ${found};\nдействует: ${active}`;
+  }
+  if (!summary && rows.length && tableEl.querySelector('tbody tr[data-overall-label]')
+      && headers.some(h => /стройдок/i.test(h)) && headers.some(h => /normacs/i.test(h))) {
+    const ncIndex = headers.findIndex(h => /^normacs$/i.test(h));
+    const foundStn = rows.filter(r => r.cells[1]?.href).length;
+    const foundNc = rows.filter(r => r.cells[ncIndex]?.href).length;
+    const active = rows.filter(r => r.fill === 'active').length;
+    summary = `Всего в документе: ${rows.length}; найдено в Стройдок: ${foundStn}; `
+      + `найдено в NormaCS: ${foundNc};\nдействует хотя бы в одном: ${active}`;
   }
   if (!summary && rows.length) {
     const foundStn = rows.filter(r => r.cells[1] && r.cells[1].href).length;
@@ -484,6 +503,7 @@ function buildNormativeTablePdfPayload(workspaceEl) {
     summary,
     headers,
     rows,
+    combined: !!tableEl.querySelector('tbody tr[data-overall-label]'),
     widths: hasNormacsCol ? headers.map(() => 30) : hasTnpaCol ? [70, 24, 22, 40, 40] : [80, 30, 45, 45],
   };
 }
@@ -569,6 +589,7 @@ const NORMATIVE_TABLE_COL_WIDTHS = [280, 120, 100, 218, 218];
 const NORMATIVE_ROW_BG = {
   'row-active': '#e8f5ec',
   'row-canceled': '#fce9ea',
+  'row-warn': '#fff4d6',
 };
 
 function applyNormativeTableLayout(root) {
@@ -611,8 +632,14 @@ function applyNormativeRowColors(root) {
       let bg = '#ffffff';
       if (tr.classList.contains('row-active')) bg = NORMATIVE_ROW_BG['row-active'];
       else if (tr.classList.contains('row-canceled')) bg = NORMATIVE_ROW_BG['row-canceled'];
+      else if (tr.classList.contains('row-warn')) bg = NORMATIVE_ROW_BG['row-warn'];
       tr.querySelectorAll('td').forEach(td => {
         let cellBg = bg;
+        if (td.classList.contains('stn-source-cell')) {
+          cellBg = td.classList.contains('stn-state-active') ? '#e8f5ec'
+            : td.classList.contains('stn-state-inactive') ? '#fce9ea'
+            : td.classList.contains('stn-state-upcoming') ? '#fff4d6' : '#ffffff';
+        }
         if (td.classList.contains('normacs-status')) {
           cellBg = td.classList.contains('normacs-status-1') ? '#e8f5ec'
             : td.classList.contains('normacs-status-0') ? '#fce9ea'
@@ -733,6 +760,16 @@ function _previewBaseSize(img, box) {
   };
 }
 
+function _previewZoomLayout(base, scale, box) {
+  const {w: availW, h: availH} = _previewAvailSize(box);
+  const displayW = base.w * scale;
+  const displayH = base.h * scale;
+  const stageW = Math.max(displayW, availW);
+  const stageH = Math.max(displayH, availH);
+  return {displayW, displayH, stageW, stageH,
+    padX: (stageW - displayW) / 2, padY: (stageH - displayH) / 2};
+}
+
 function _capturePreviewZoomAnchor(img, box, anchor) {
   if (!anchor || !box || !img) return;
   const rect = box.getBoundingClientRect();
@@ -740,23 +777,10 @@ function _capturePreviewZoomAnchor(img, box, anchor) {
   const viewY = anchor.clientY - rect.top;
   img.dataset.zoomViewX = String(viewX);
   img.dataset.zoomViewY = String(viewY);
-  const oldScale = Number(img.dataset.scale || '1');
-  if (oldScale <= 1.01) {
-    const imgRect = img.getBoundingClientRect();
-    if (imgRect.width > 0 && imgRect.height > 0) {
-      const fracX = (anchor.clientX - imgRect.left) / imgRect.width;
-      const fracY = (anchor.clientY - imgRect.top) / imgRect.height;
-      img.dataset.zoomFracX = String(Math.min(1, Math.max(0, fracX)));
-      img.dataset.zoomFracY = String(Math.min(1, Math.max(0, fracY)));
-    }
-    return;
-  }
-  const base = _previewBaseSize(img, box);
-  const oldDisplayW = base.w * oldScale;
-  const oldDisplayH = base.h * oldScale;
-  if (oldDisplayW > 0 && oldDisplayH > 0) {
-    const fracX = (box.scrollLeft + viewX) / oldDisplayW;
-    const fracY = (box.scrollTop + viewY) / oldDisplayH;
+  const imgRect = img.getBoundingClientRect();
+  if (imgRect.width > 0 && imgRect.height > 0) {
+    const fracX = (anchor.clientX - imgRect.left) / imgRect.width;
+    const fracY = (anchor.clientY - imgRect.top) / imgRect.height;
     img.dataset.zoomFracX = String(Math.min(1, Math.max(0, fracX)));
     img.dataset.zoomFracY = String(Math.min(1, Math.max(0, fracY)));
   }
@@ -770,12 +794,11 @@ function _applyPreviewZoomScroll(img, box, scale) {
   const viewY = Number(img.dataset.zoomViewY || 0);
   if (!Number.isFinite(fracX) || !Number.isFinite(fracY)) return;
   const base = _previewBaseSize(img, box);
-  const newDisplayW = base.w * scale;
-  const newDisplayH = base.h * scale;
+  const layout = _previewZoomLayout(base, scale, box);
   const maxScrollL = Math.max(0, box.scrollWidth - box.clientWidth);
   const maxScrollT = Math.max(0, box.scrollHeight - box.clientHeight);
-  box.scrollLeft = Math.min(maxScrollL, Math.max(0, fracX * newDisplayW - viewX));
-  box.scrollTop = Math.min(maxScrollT, Math.max(0, fracY * newDisplayH - viewY));
+  box.scrollLeft = Math.min(maxScrollL, Math.max(0, layout.padX + fracX * layout.displayW - viewX));
+  box.scrollTop = Math.min(maxScrollT, Math.max(0, layout.padY + fracY * layout.displayH - viewY));
   delete img.dataset.zoomFracX;
   delete img.dataset.zoomFracY;
   delete img.dataset.zoomViewX;
@@ -851,6 +874,7 @@ function fitPreviewImage(img) {
 
   img.draggable = false;
   img.style.margin = '0';
+  img.style.display = 'block';
   img.style.objectFit = 'contain';
   img.style.position = 'static';
   img.style.maxWidth = 'none';
@@ -890,19 +914,19 @@ function fitPreviewImage(img) {
   stage.style.margin = '0';
   stage.style.transform = 'none';
 
-  const displayW = base.w * userScale;
-  const displayH = base.h * userScale;
-  const { w: availW, h: availH } = _previewAvailSize(box);
+  const layout = _previewZoomLayout(base, userScale, box);
 
   stage.style.display = 'block';
   stage.style.alignItems = '';
   stage.style.justifyContent = '';
-  stage.style.width = `${Math.max(displayW, availW)}px`;
-  stage.style.height = `${Math.max(displayH, availH)}px`;
-  stage.style.minWidth = `${Math.max(displayW, availW)}px`;
-  stage.style.minHeight = `${Math.max(displayH, availH)}px`;
+  stage.style.width = `${layout.stageW}px`;
+  stage.style.height = `${layout.stageH}px`;
+  stage.style.minWidth = `${layout.stageW}px`;
+  stage.style.minHeight = `${layout.stageH}px`;
   img.style.width = `${base.w}px`;
   img.style.height = `${base.h}px`;
+  img.style.marginLeft = `${layout.padX}px`;
+  img.style.marginTop = `${layout.padY}px`;
   img.style.transform = `scale(${userScale})`;
   img.style.transformOrigin = '0 0';
   img.style.cursor = 'grab';
@@ -1296,12 +1320,12 @@ function clearFeed() {
     <div class="welcome-hero">
       <div class="welcome-badge">Локальная обработка · данные не уходят в облако</div>
       <h1 class="welcome-title">Проверка ГОСТ<br>на чертеже</h1>
-      <p class="welcome-sub">Загрузите PDF или скан — система найдёт нормативы на всех листах и проверит их статус в NormaCS (РФ). Стройдок временно отключён.</p>
+      <p class="welcome-sub">Загрузите PDF или скан — система найдёт нормативы на всех листах и проверит их статус в подключённых реестрах.</p>
     </div>
     <div class="steps">
       <div class="step-card"><div class="step-num">1</div><div class="step-body"><div class="step-title">Загрузите файл</div><div class="step-desc">PDF, скан или изображение листа</div></div></div>
       <div class="step-card"><div class="step-num">2</div><div class="step-body"><div class="step-title">OCR находит нормативы</div><div class="step-desc">Поиск по всему листу, без подстановок</div></div></div>
-      <div class="step-card"><div class="step-num">3</div><div class="step-body"><div class="step-title">Проверка актуальности</div><div class="step-desc">NormaCS · РФ</div></div></div>
+      <div class="step-card"><div class="step-num">3</div><div class="step-body"><div class="step-title">Проверка актуальности</div><div class="step-desc">Подключённые реестры</div></div></div>
     </div>
     <div class="welcome-actions">
       <button type="button" class="action-card action-card-primary" onclick="document.getElementById('file-input').click()">
@@ -1314,6 +1338,7 @@ function clearFeed() {
       </button>
     </div>`;
   inner.appendChild(welcome);
+  updateRegistryModeUI();
 }
 
 // ── models ────────────────────────────────────────────────────────────────────
@@ -1343,6 +1368,28 @@ async function loadModels() {
   }
 }
 
+function updateRegistryModeUI() {
+  if (!currentRegistryStatus) return;
+  const stn = currentRegistryStatus.stn || {};
+  const normacs = currentRegistryStatus.normacs || {};
+  const sources = [];
+  if (stn.enabled) sources.push('Стройдок · РБ');
+  if (normacs.enabled) sources.push('NormaCS · РФ');
+  const sourceText = sources.join(' + ') || 'реестры не настроены';
+  const badge = document.getElementById('normacs-mode-badge');
+  if (badge) {
+    badge.textContent = `Проверка: ${sourceText}`;
+    badge.classList.toggle('warn', !sources.length
+      || (stn.enabled && !stn.configured) || (normacs.enabled && !normacs.configured));
+  }
+  const welcome = document.querySelector('#empty-state .welcome-sub');
+  if (welcome) welcome.textContent = sources.length
+    ? `Загрузите PDF или скан — система найдёт нормативы и проверит их статус: ${sourceText}.`
+    : 'Загрузите PDF или скан — нормативы будут найдены, но реестры пока не настроены.';
+  const step = document.querySelector('#empty-state .step-card:nth-child(3) .step-desc');
+  if (step) step.textContent = sourceText;
+}
+
 async function loadSystemStatus() {
   try {
     const data = await fetch('/api/status').then(r => r.json());
@@ -1352,14 +1399,10 @@ async function loadSystemStatus() {
 
     const stn = data.stn || {};
     const normacs = data.normacs || {};
+    currentRegistryStatus = {stn, normacs};
+    updateRegistryModeUI();
     const dateField = document.getElementById('stn-check-date-field');
     if (dateField) dateField.hidden = !stn.enabled;
-    const modeBadge = document.getElementById('normacs-mode-badge');
-    if (modeBadge) {
-      const ready = normacs.enabled && normacs.configured;
-      modeBadge.textContent = ready ? 'Проверка: NormaCS · РФ' : 'NormaCS не настроен · проверьте Интеграции';
-      modeBadge.classList.toggle('warn', !ready);
-    }
     if (!banner) return;
     if (!stn.enabled) {
       banner.hidden = false;

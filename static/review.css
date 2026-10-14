@@ -62,6 +62,9 @@ body {background: var(--bg);}
 .review-status.good {background: var(--review-good-bg); color: var(--review-good-text);}
 .review-status.warn {background: var(--review-warn-bg); color: var(--review-warn-text);}
 .review-status.bad {background: var(--review-bad-bg); color: var(--review-bad-text);}
+.review-status.neutral {background: var(--surface-muted); color: var(--text-secondary);}
+.normative-row-verdict {font-weight: 600;}
+.normative-row-conflict {color: var(--review-warn-text); font-weight: 600;}
 .review-workspace[data-review-view="cards"] .review-list {border: none; background: transparent; gap: 10px; grid-template-columns: repeat(auto-fit,minmax(min(240px,100%),1fr));}
 .review-workspace[data-review-view="cards"] .review-item {border: 1px solid var(--border); border-radius: 10px;}
 .review-detail {background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 16px;}

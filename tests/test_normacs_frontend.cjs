@@ -17,6 +17,7 @@ const context = {
 vm.createContext(context);
 vm.runInContext(functionCode('applyNormativeTableLayout', 'applyNormativeRowColors'), context);
 vm.runInContext(functionCode('applyNormativeRowColors', 'beautifyNormativeHtml'), context);
+vm.runInContext(functionCode('_cellText', 'buildNormativeTablePdfDocDefinition'), context);
 const status = element(['normacs-status', 'normacs-status-2']);
 const missing = element(['normacs-status']);
 const stn = element();
@@ -26,6 +27,20 @@ context.applyNormativeRowColors({ querySelectorAll: () => [container] });
 assert.equal(stn.style['background-color'], '#fce9ea');
 assert.equal(status.style['background-color'], '#fff4d6');
 assert.equal(missing.style['background-color'], '#ffffff');
+const mixedStn = element(['stn-source-cell', 'stn-state-inactive']);
+const mixedNc = element(['normacs-status', 'normacs-status-1']);
+const mixed = { ...element(['row-active']), querySelectorAll: () => [mixedStn, mixedNc] };
+context.applyNormativeRowColors({ querySelectorAll: () => [
+  { style: {}, querySelectorAll: selector => selector === 'thead th' ? [] : [mixed] }
+] });
+assert.equal(mixedStn.style['background-color'], '#fce9ea');
+assert.equal(mixedNc.style['background-color'], '#e8f5ec');
+const statusText = {childNodes: [
+  {nodeType: 3, textContent: 'Частично действует'},
+  {nodeType: 1, tagName: 'BR', textContent: ''},
+  {nodeType: 1, tagName: 'SMALL', textContent: 'Введен: 2013-07-29'},
+]};
+assert.equal(context._cellText(statusText), 'Частично действует Введен: 2013-07-29');
 const cg = { replaceChildren(...cols) { this.cols = cols; } };
 const table = { ...element(['normative-table-normacs']),
   querySelectorAll: () => Array(6).fill({}), querySelector: () => cg };
