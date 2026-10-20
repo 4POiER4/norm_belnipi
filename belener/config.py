@@ -828,7 +828,7 @@ def gost_check_budget_human(page_count: int = 1) -> str:
 
 
 def stn_pipeline_reserve_sec(page_count: int = 1, refs_count: int = 0) -> float:
-    """Пост-OCR бюджет STN (масштабируется с числом листов и нормативов)."""
+    """Пост-OCR бюджет источника РБ (имя сохранено для старых вызовов)."""
     total = gost_check_total_budget_sec(page_count)
     pages = max(1, int(page_count))
     refs = max(int(refs_count), 0)
@@ -839,10 +839,10 @@ def stn_pipeline_reserve_sec(page_count: int = 1, refs_count: int = 0) -> float:
 
 
 def pipeline_stn_deadline(*, pipeline_t0: float, page_count: int = 1, refs_count: int = 0) -> float:
-    """Отдельное окно STN, которое начинается после завершения OCR.
+    """Отдельное окно проверки РБ, которое начинается после завершения OCR.
 
     На больших PDF OCR может занять почти весь общий бюджет запроса. Если считать
-    дедлайн STN от начала пайплайна, проверка normy.stn.by стартует уже с
+    дедлайн от начала пайплайна, внешний поиск стартует уже с
     истёкшим окном и все нормативы помечаются как пропущенные. Поэтому время
     старта пайплайна оставлено в сигнатуре для совместимости, но окно проверки
     всегда отсчитывается от текущего момента.
@@ -866,9 +866,9 @@ def pipeline_post_ocr_deadline(*, pipeline_t0: float, page_count: int = 1) -> fl
 
 
 def stn_batch_budget_sec() -> float:
-    """Резерв времени на проверку normy.stn.by внутри общего бюджета."""
+    """Резерв времени на проверку Стройпрофи внутри общего бюджета."""
     try:
-        return max(20.0, min(float(os.environ.get("PDF_STN_BATCH_BUDGET", "60").strip()), 180.0))
+        return max(20.0, min(float(os.environ.get("PDF_STROIPROFI_BATCH_BUDGET", "60").strip()), 180.0))
     except ValueError:
         return 60.0
 
@@ -1243,6 +1243,43 @@ def stn_lookup_enabled() -> bool:
         "yes",
         "on",
     )
+
+
+def stroiprofi_lookup_enabled() -> bool:
+    """Новая проверка РБ; старый PDF_STN_LOOKUP на неё не влияет."""
+    return (os.environ.get("PDF_STROIPROFI_LOOKUP") or "1").strip().lower() in (
+        "1", "true", "yes", "on",
+    )
+
+
+def stroiprofi_base_url() -> str:
+    return (stroiprofi_credentials().get("base_url") or "https://стройпрофи.бел").rstrip("/")
+
+
+def stroiprofi_credentials() -> dict[str, str]:
+    try:
+        from belener.integration_store import get_stroiprofi_credentials
+        return get_stroiprofi_credentials()
+    except Exception:
+        return {
+            "base_url": (os.environ.get("PDF_STROIPROFI_BASE_URL") or "https://стройпрофи.бел").strip(),
+            "login": (os.environ.get("PDF_STROIPROFI_LOGIN") or "").strip(),
+            "password": (os.environ.get("PDF_STROIPROFI_PASSWORD") or "").strip(),
+        }
+
+
+def stroiprofi_timeout_sec() -> int:
+    try:
+        return max(5, min(int(os.environ.get("PDF_STROIPROFI_TIMEOUT", "20")), 90))
+    except ValueError:
+        return 20
+
+
+def stroiprofi_parallel_workers() -> int:
+    try:
+        return max(1, min(int(os.environ.get("PDF_STROIPROFI_PARALLEL", "2")), 8))
+    except ValueError:
+        return 2
 
 
 def stn_base_url() -> str:

@@ -7,6 +7,26 @@ from belener.normative_pdf import build_normative_pdf_bytes
 
 
 class MixedRegistryPdfTests(unittest.TestCase):
+    def test_stroiprofi_mixed_report_export(self):
+        payload = {
+            "title": "Таблица нормативов", "combined": True,
+            "headers": ["Обозначение", "Стройпрофи", "Введен (Стройпрофи)",
+                        "Отменен (Стройпрофи)", "NormaCS", "Статус NormaCS (РФ)"],
+            "summary": ("Всего в документе: 1; найдено в Стройпрофи: 1; "
+                        "найдено в NormaCS: 0;\nдействует хотя бы в одном: 1; "
+                        "частично: 0; расхождения: 0"),
+            "rows": [{"fill": "active", "cells": [
+                {"text": "СН 1.02.02-2023"},
+                {"text": "Стройпрофи", "href": "https://стройпрофи.бел/tnpa/document/8298"},
+                {"text": "02.10.2023"}, {"text": "—"}, {"text": "—"}, {"text": "Не найден"},
+            ]}],
+        }
+        with fitz.open(stream=build_normative_pdf_bytes(payload), filetype="pdf") as doc:
+            extracted = " ".join(page.get_text() for page in doc)
+        self.assertIn("Стройпрофи", extracted)
+        self.assertNotIn("Стройдок", extracted)
+        self.assertIn("Действует", extracted)
+
     def test_mixed_summary_and_statuses_survive_export(self):
         payload = {
             "title": "Таблица нормативов",

@@ -44,7 +44,7 @@ function reviewReadRecords(workspace) {
   const headings = [...table.querySelectorAll('thead th')].map(th => th.textContent.replace(/\s+/g, ' ').trim());
   const introduced = headings.findIndex(h => /введ[её]н/i.test(h));
   const canceled = headings.findIndex(h => /отмен[её]н/i.test(h));
-  const stnPresent = headings.some(h => /^стройдок$/i.test(h));
+  const stnPresent = headings.some(h => /^(?:стройдок|стройпрофи)$/i.test(h));
   const ncColumn = headings.findIndex(h => /статус.*normacs/i.test(h));
   return [...table.querySelectorAll('tbody tr')].map((row, index) => {
     const cells = [...row.querySelectorAll('td')];
@@ -63,7 +63,9 @@ function reviewReadRecords(workspace) {
     const status = row.dataset.overallLabel
       ? {label: row.dataset.overallLabel, tone: row.dataset.overallTone || 'neutral'}
       : stnStatus || {label: ncStatus, tone: ncTone};
-    return {index, row, stnPresent, ref: row.dataset.normativeRef || cell(0), title: row.dataset.normativeTitle || '',
+    const rbLabel = row.dataset.rbProvider === 'stroiprofi' ? 'Стройпрофи · РБ' : 'Стройдок · РБ';
+    return {index, row, stnPresent, rbLabel, ref: row.dataset.normativeRef || cell(0), title: row.dataset.normativeTitle || '',
+      stnCode: row.dataset.stnCode || '',
       status, stnStatus, overallNote: row.dataset.overallNote || '',
       conflict: row.dataset.overallConflict === '1',
       error: row.dataset.stnError || cells[1]?.querySelector('[title]')?.title || '',
@@ -196,8 +198,9 @@ function selectReviewRecord(workspace, index, jump = true) {
   if (record.overallNote) detail.append(reviewElement('p', record.conflict ? 'review-error' : 'review-note', record.overallNote));
   if (record.stnPresent) {
     const rb = reviewElement('section', 'review-source');
-    const rbHead = reviewElement('div', 'review-source-head'); rbHead.append(reviewElement('span', '', 'Стройдок · РБ'), reviewElement('span', `review-status ${record.stnStatus.tone}`, record.stnStatus.label));
+    const rbHead = reviewElement('div', 'review-source-head'); rbHead.append(reviewElement('span', '', record.rbLabel), reviewElement('span', `review-status ${record.stnStatus.tone}`, record.stnStatus.label));
     rb.append(rbHead, reviewElement('p', '', 'Введён: '+record.intro), reviewElement('p', '', 'Отменён: '+record.cancel));
+    if (record.stnCode && record.rbLabel.startsWith('Стройпрофи')) rb.append(reviewElement('p', '', 'Последняя редакция: '+record.stnCode));
     if (record.error) rb.append(reviewElement('p', 'review-error', record.error));
     const rbLink = reviewSourceLink(record.stnLink); if (rbLink) rb.append(rbLink);
     detail.append(rb);

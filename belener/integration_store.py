@@ -14,6 +14,7 @@ _DB_GETTER = None
 _STN_HOST = re.compile(r"stn\.by", re.I)
 _TNPA_HOST = re.compile(r"tnpa\.by", re.I)
 _NORMACS_HOST = re.compile(r"normacs|nanocad\.ru", re.I)
+_STROIPROFI_HOST = re.compile(r"стройпрофи\.бел|xn--h1abobedddj0a\.xn--90ais", re.I)
 
 
 def bind_db_getter(getter) -> None:
@@ -79,6 +80,7 @@ def _row_to_dict(row: dict) -> dict[str, Any]:
     is_stn = kind == "stn" or bool(_STN_HOST.search(site_url))
     is_tnpa = kind == "tnpa" or bool(_TNPA_HOST.search(site_url))
     is_normacs = kind == "normacs" or bool(_NORMACS_HOST.search(site_url))
+    is_stroiprofi = kind == "stroiprofi" or bool(_STROIPROFI_HOST.search(site_url))
     effective_pwd = pwd if pwd else (_effective_stn_password(site_login, pwd, enc) if is_stn else "")
     return {
         "id": str(row["id"]),
@@ -88,7 +90,7 @@ def _row_to_dict(row: dict) -> dict[str, Any]:
         "password_set": bool(effective_pwd) or (bool(enc) if is_stn else False),
         "password_hint": _mask(pwd or effective_pwd) if is_stn else "",
         "kind": kind,
-        "can_test": is_stn or is_tnpa or is_normacs,
+        "can_test": is_tnpa or is_normacs or is_stroiprofi,
     }
 
 
@@ -102,8 +104,10 @@ def _mask(value: str) -> str:
 
 def _detect_kind(site_url: str, kind: str = "") -> str:
     k = (kind or "").strip().lower()
-    if k in ("stn", "tnpa", "normacs", "generic"):
+    if k in ("stn", "tnpa", "normacs", "stroiprofi", "generic"):
         return k
+    if _STROIPROFI_HOST.search(site_url or ""):
+        return "stroiprofi"
     if _STN_HOST.search(site_url or ""):
         return "stn"
     if _TNPA_HOST.search(site_url or ""):
@@ -127,6 +131,23 @@ def get_normacs_credentials() -> dict[str, str]:
                      or "http://n.nanocad.ru:9999/normacsweb/").strip(),
         "login": (os.environ.get("PDF_NORMACS_LOGIN") or "").strip(),
         "password": (os.environ.get("PDF_NORMACS_PASSWORD") or "").strip(),
+    }
+
+
+def get_stroiprofi_credentials() -> dict[str, str]:
+    """Отдельная учётная запись Стройпрофи; старые реквизиты Стройдока не используем."""
+    try:
+        for site in list_sites():
+            if site.get("kind") == "stroiprofi" or _STROIPROFI_HOST.search(site.get("site_url") or ""):
+                full = _get_site_secrets(site["id"])
+                if full and full.get("login") and full.get("password"):
+                    return full
+    except Exception:
+        log.warning("Стройпрофи: не удалось прочитать интеграции; используются переменные окружения")
+    return {
+        "base_url": (os.environ.get("PDF_STROIPROFI_BASE_URL") or "https://стройпрофи.бел").strip(),
+        "login": (os.environ.get("PDF_STROIPROFI_LOGIN") or "").strip(),
+        "password": (os.environ.get("PDF_STROIPROFI_PASSWORD") or "").strip(),
     }
 
 

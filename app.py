@@ -307,8 +307,8 @@ def _ollama_user_message(exc: Exception) -> str:
     low = msg.lower()
     if "timed out" in low or "timeout" in low:
         return (
-            "Таймаут при обращении к normy.stn.by. Список ГОСТ на листе сохранён; "
-            "проверку актуальности повторите позже или увеличьте PDF_STN_TIMEOUT в .env."
+            "Таймаут при проверке документа. Список нормативов на листе сохранён; "
+            "повторите проверку позже или проверьте лимиты ожидания внешних сервисов в .env."
         )
     if "model runner" in low or "unexpectedly stopped" in low:
         return (
@@ -387,7 +387,7 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
         gost_check_total_budget_sec,
         pipeline_post_ocr_deadline,
         pipeline_stn_deadline,
-        stn_lookup_enabled,
+        stroiprofi_lookup_enabled,
     )
     from belener.normative_extract import extract_normatives_pdf_path, normative_result_to_markdown
 
@@ -432,9 +432,10 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
         yield from _sse_error(str(result.get("error") or "Не удалось прочитать PDF"))
         return
 
-    result["stn_enabled"] = stn_lookup_enabled()
+    result["stn_enabled"] = stroiprofi_lookup_enabled()
+    result["rb_provider"] = "stroiprofi"
 
-    from belener.stn_lookup import refine_and_check_normative_refs
+    from belener.stroiprofi_lookup import check_normative_refs
     from belener.normative_extract import generate_pdf_preview_pages_with_highlights
 
     stn_checks = []
@@ -483,13 +484,13 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
                     refs_count=refs_count,
                 )
                 app.logger.info(
-                    "STN batch starting after OCR file=%s pages=%s refs=%s budget=%.0fs",
+                    "Стройпрофи: поиск после OCR file=%s pages=%s refs=%s budget=%.0fs",
                     filename,
                     page_count,
                     refs_count,
                     max(0.0, stn_deadline - time.monotonic()),
                 )
-                refined, checks = refine_and_check_normative_refs(
+                refined, checks = check_normative_refs(
                     result.get("normative_refs") or [],
                     today=validity_date,
                     deadline=stn_deadline,
@@ -498,7 +499,7 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
                 result["stn_checks"] = [c.to_dict() for c in checks]
                 stn_checks.extend(checks)
             except Exception as e:
-                app.logger.exception("STN batch failed file=%s", filename)
+                app.logger.exception("Стройпрофи: ошибка поиска file=%s", filename)
                 result["stn_error"] = _ollama_user_message(e)
                 stn_box["err"] = e
             finally:
@@ -510,8 +511,8 @@ def stream_extract_pdf_normative(path: str, filename: str, question: str, *, che
         stn_done.set()
         _maybe_post_done()
 
-    yield from _sse_status("Проверка NormaCS и подготовка листов…" if result.get("normacs_enabled")
-                           else "Подготовка листов…")
+    yield from _sse_status("Проверка Стройпрофи и NormaCS, подготовка листов…" if result.get("normacs_enabled")
+                           else "Проверка Стройпрофи и подготовка листов…")
     yield from _heartbeat_while_all(
         [post_done, normacs_done],
         page_count=page_count,
@@ -572,7 +573,7 @@ def _start_normacs_checks(result: dict, *, requested: bool = True) -> threading.
 def _normative_post_status(result, stn_done, preview_done, normacs_done):
     stages = []
     if result.get("stn_enabled"):
-        stages.append("Стройдок: " + ("завершён" if stn_done.is_set() else "проверяется"))
+        stages.append("Стройпрофи: " + ("завершён" if stn_done.is_set() else "проверяется"))
     if result.get("normacs_enabled"):
         stages.append("NormaCS: " + ("завершён" if normacs_done.is_set() else
                       "проверено " + result.get("normacs_progress", "0")))
@@ -589,14 +590,14 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
         gost_check_total_budget_sec,
         pipeline_post_ocr_deadline,
         pipeline_stn_deadline,
-        stn_lookup_enabled,
+        stroiprofi_lookup_enabled,
     )
     from belener.normative_extract import (
         extract_normatives_from_image_path,
         generate_pdf_preview_pages_with_highlights,
         normative_result_to_markdown,
     )
-    from belener.stn_lookup import refine_and_check_normative_refs
+    from belener.stroiprofi_lookup import check_normative_refs
 
     validity_date = check_date or date.today()
     pipeline_t0 = time.monotonic()
@@ -629,7 +630,8 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
         return
 
     result = box["result"] or {}
-    result["stn_enabled"] = stn_lookup_enabled()
+    result["stn_enabled"] = stroiprofi_lookup_enabled()
+    result["rb_provider"] = "stroiprofi"
     include_ctx = "контекст" in (question or "").casefold()
     stn_checks = []
     preview_box: dict = {"pages": None}
@@ -670,13 +672,13 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
                     refs_count=refs_count,
                 )
                 app.logger.info(
-                    "STN batch starting after OCR file=%s pages=%s refs=%s budget=%.0fs",
+                    "Стройпрофи: поиск после OCR file=%s pages=%s refs=%s budget=%.0fs",
                     filename,
                     page_count,
                     refs_count,
                     max(0.0, stn_deadline - time.monotonic()),
                 )
-                refined, checks = refine_and_check_normative_refs(
+                refined, checks = check_normative_refs(
                     result.get("normative_refs") or [],
                     today=validity_date,
                     deadline=stn_deadline,
@@ -685,7 +687,7 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
                 result["stn_checks"] = [c.to_dict() for c in checks]
                 stn_checks.extend(checks)
             except Exception as e:
-                app.logger.exception("STN batch failed file=%s", filename)
+                app.logger.exception("Стройпрофи: ошибка поиска file=%s", filename)
                 result["stn_error"] = _ollama_user_message(e)
             finally:
                 stn_done.set()
@@ -696,8 +698,8 @@ def stream_extract_image_normative(path: str, filename: str, question: str, *, c
         stn_done.set()
         _maybe_post_done()
 
-    yield from _sse_status("Проверка NormaCS и подготовка листов…" if result.get("normacs_enabled")
-                           else "Подготовка листов…")
+    yield from _sse_status("Проверка Стройпрофи и NormaCS, подготовка листов…" if result.get("normacs_enabled")
+                           else "Проверка Стройпрофи и подготовка листов…")
     yield from _heartbeat_while_all(
         [post_done, normacs_done],
         page_count=page_count,
@@ -861,13 +863,12 @@ def init_db():
         with conn.cursor() as cur:
             cur.execute(open(schema).read())
         conn.commit()
-    from belener.integration_store import bind_db_getter as bind_integrations, migrate_legacy_stn
+    from belener.integration_store import bind_db_getter as bind_integrations
     from belener.settings_store import bind_db_getter, migrate_env_if_empty
 
     bind_db_getter(get_db)
     bind_integrations(get_db)
     try:
-        migrate_legacy_stn()
         migrate_env_if_empty()
     except Exception as e:
         app.logger.warning("settings migrate skipped: %s", e)
@@ -1710,18 +1711,17 @@ def name_image():
 
 @app.route("/api/status")
 def api_status():
-    from belener.config import stn_login, stn_lookup_enabled, stn_password
+    from belener.config import stroiprofi_credentials, stroiprofi_lookup_enabled
     from belener.config import normacs_credentials, normacs_lookup_enabled
 
-    login = stn_login()
-    password = stn_password()
+    stroiprofi = stroiprofi_credentials()
     normacs = normacs_credentials()
     return jsonify(
         {
             "gost_only": True,
-            "stn": {
-                "enabled": stn_lookup_enabled(),
-                "configured": bool(login and password),
+            "stroiprofi": {
+                "enabled": stroiprofi_lookup_enabled(),
+                "configured": bool(stroiprofi.get("login") and stroiprofi.get("password")),
             },
             "normacs": {
                 "enabled": normacs_lookup_enabled(),

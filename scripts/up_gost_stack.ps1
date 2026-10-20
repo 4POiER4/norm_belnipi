@@ -15,7 +15,7 @@ if (-not (Test-Path "$Root\data\tmp")) { New-Item -ItemType Directory -Path "$Ro
 
 if (-not (Test-Path "$Root\.env")) {
     Copy-Item "$Root\.env.example" "$Root\.env"
-    Write-Host "Created .env — set PDF_STN_LOGIN/PDF_STN_PASSWORD for STN checks."
+    Write-Host "Created .env — set PDF_STROIPROFI_LOGIN/PDF_STROIPROFI_PASSWORD for Стройпрофи checks."
 }
 
 $composeFiles = @(

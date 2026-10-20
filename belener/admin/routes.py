@@ -360,20 +360,33 @@ def admin_delete_site(site_id: str):
 @_require_admin
 def admin_test_site(site_id: str):
     from belener.integration_store import get_site, resolve_site_credentials
-    from belener.stn_lookup import StnClient, reset_stn_client
     from belener.tnpa_lookup import test_tnpa_connection
 
     site = get_site(site_id)
     if not site:
         return jsonify({"error": "Сайт не найден"}), 404
-    if not site.get("can_test"):
-        return jsonify({"error": "Проверка доступна для Стройдок, NormaCS и ТНПА"}), 400
-
     kind = (site.get("kind") or "").strip().lower()
     site_url = (site.get("site_url") or "").strip()
+    if kind == "stn" or "normy.stn.by" in site_url.casefold():
+        return jsonify({"error": "Стройдок отключён; используйте интеграцию Стройпрофи"}), 410
+    if not site.get("can_test"):
+        return jsonify({"error": "Проверка доступна для Стройпрофи, NormaCS и ТНПА"}), 400
     if kind == "tnpa" or "tnpa.by" in site_url.casefold():
         ok, message = test_tnpa_connection(base_url=site_url or None)
         return jsonify({"success": ok, "message": message}), (200 if ok else 400)
+
+    if kind == "stroiprofi" or "стройпрофи.бел" in site_url.casefold() or "xn--h1abobedddj0a" in site_url:
+        from datetime import date
+        from belener.stroiprofi_lookup import StroiprofiClient
+        creds = resolve_site_credentials(site_id) or {}
+        try:
+            client = StroiprofiClient(base_url=site_url, login=creds.get("login") or "",
+                                      password=creds.get("password") or "")
+            result = client.lookup("СН", "СН 1.02.02-2023", as_of=date.today())
+            ok = result.found and not result.error
+            return jsonify({"success": ok, "message": "Стройпрофи: проверка выполнена" if ok else result.error or result.status}), (200 if ok else 400)
+        except Exception as exc:
+            return jsonify({"success": False, "message": str(exc)}), 400
 
     creds = resolve_site_credentials(site_id)
     if not creds or not creds.get("login") or not creds.get("password"):
@@ -389,11 +402,4 @@ def admin_test_site(site_id: str):
             return jsonify({"success": False, "message": str(exc)}), 400
         finally:
             client.close()
-    reset_stn_client()
-    client = StnClient(base_url=creds.get("base_url") or None, login=creds["login"], password=creds.get("password") or "")
-    try:
-        client.login(client._login_user, client._login_pass)
-        return jsonify({"success": True, "message": "Вход выполнен успешно"})
-    except Exception as e:
-        return jsonify({"success": False, "message": str(e)}), 400
-
+    return jsonify({"error": "Неизвестный тип интеграции"}), 400

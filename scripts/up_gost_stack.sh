@@ -1,11 +1,11 @@
 #!/usr/bin/env bash
-# GOST stack: web + PostgreSQL, tile OCR, STN lookup. No GPU / Ollama required.
+# GOST stack: web + PostgreSQL, tile OCR, Стройпрофи + NormaCS. No GPU / Ollama required.
 set -euo pipefail
 cd "$(dirname "$0")/.."
 
 if [[ ! -f .env ]]; then
   cp .env.example .env
-  echo "Created .env from .env.example — add PDF_STN_LOGIN/PDF_STN_PASSWORD for STN checks."
+  echo "Created .env from .env.example — add PDF_STROIPROFI_LOGIN/PDF_STROIPROFI_PASSWORD for Стройпрофи checks."
 fi
 
 mkdir -p scan data/tmp

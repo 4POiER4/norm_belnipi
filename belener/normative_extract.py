@@ -1130,6 +1130,7 @@ def normative_refs_to_markdown(
     include_context: bool = False,
     stn_checks: list | None = None,
     include_stn: bool = True,
+    rb_provider: str = "stn",
     tnpa_checks: list | None = None,
     include_tnpa: bool | None = None,
     normacs_checks: list | None = None,
@@ -1141,11 +1142,14 @@ def normative_refs_to_markdown(
     page_count: int = 0,
     pages_processed: int = 0,
     budget_exhausted: bool = False,
+    merged_fragment_count: int = 0,
     source_path: str = "",
     page_normative_refs: list[list[dict]] | None = None,
     page_preview_words: list[list] | None = None,
     preview_pages: list[dict[str, Any]] | None = None,
 ) -> str:
+    rb_label = "Стройпрофи" if rb_provider == "stroiprofi" else "Стройдок"
+    rb_label_full = rb_label + " · РБ"
     lines = ["## Нормативные документы (ГОСТ, ОСТ, СТП, РД, СНиП, СН, НРР, ТПР, ТУ, ТКП, СТБ, СП и др.)", ""]
     lines.append('<div class="normative-workspace">')
     lines.append('<div class="normative-workspace-list">')
@@ -1165,6 +1169,11 @@ def normative_refs_to_markdown(
         meta.append(f"<p>{note}</p>")
     elif budget_exhausted:
         meta.append("<p><em>Не все участки листа успели прочитаться — список может быть неполным.</em></p>")
+    if merged_fragment_count > 0:
+        meta.append(
+            f"<p><strong>Уникальных обозначений:</strong> {len(refs)} · "
+            f"<strong>Объединено неполных повторов:</strong> {merged_fragment_count}</p>"
+        )
     if check_date:
         meta.append(
             f"<p><strong>Дата проверки актуальности:</strong> "
@@ -1247,11 +1256,11 @@ def normative_refs_to_markdown(
         if show_normacs:
             titles = ["Обозначение"]
             if show_stn:
-                titles.append("Стройдок")
+                titles.append(rb_label)
             if show_tnpa:
                 titles.append("ТНПА")
             if show_stn:
-                titles.extend(["Введен (Стройдок)", "Отменен (Стройдок)"])
+                titles.extend([f"Введен ({rb_label})", f"Отменен ({rb_label})"])
             titles.extend(["NormaCS", "Статус NormaCS (РФ)"])
             lines.append("<thead><tr>" + "".join(f"<th>{title}</th>" for title in titles))
         elif show_tnpa and show_stn:
@@ -1266,7 +1275,7 @@ def normative_refs_to_markdown(
             )
             lines.append("<thead><tr>")
             lines.append(
-                "<th>Обозначение</th><th>Стройдок</th><th>ТНПА</th>"
+                f"<th>Обозначение</th><th>{rb_label}</th><th>ТНПА</th>"
                 "<th>Введен</th><th>Отменен</th>"
             )
         elif show_stn:
@@ -1280,7 +1289,7 @@ def normative_refs_to_markdown(
             )
             lines.append("<thead><tr>")
             lines.append(
-                "<th>Обозначение</th><th>Стройдок</th>"
+                f"<th>Обозначение</th><th>{rb_label}</th>"
                 "<th>Введен</th><th>Отменен</th>"
             )
         elif show_tnpa:
@@ -1318,6 +1327,7 @@ def normative_refs_to_markdown(
             stn_found = False
             tnpa_found = False
             stn_status_val = ""
+            stn_code_val = ""
             tnpa_status_val = ""
 
             if c:
@@ -1326,18 +1336,23 @@ def normative_refs_to_markdown(
                 stn_intro = c.intro_date if hasattr(c, "intro_date") else c.get("intro_date") or "—"
                 stn_cancel = c.cancel_date if hasattr(c, "cancel_date") else c.get("cancel_date") or "—"
                 stn_status_val = c.status if hasattr(c, "status") else c.get("status") or ""
+                stn_code_val = c.stn_code if hasattr(c, "stn_code") else c.get("stn_code") or ""
                 if stn_found and (c.doc_id if hasattr(c, "doc_id") else c.get("doc_id")):
                     doc_id = c.doc_id if hasattr(c, "doc_id") else c.get("doc_id")
                     if doc_id:
-                        ips_link = (
-                            f'<a class="stn-link stn-link-stn" href="https://normy.stn.by/ips.php?{doc_id}" '
-                            f'target="_blank">Стройдок</a>'
-                        )
+                        source_url = (c.url if hasattr(c, "url") else c.get("url") or "")
+                        if rb_provider == "stroiprofi":
+                            source_url = source_url or f"https://стройпрофи.бел/tnpa/document/{doc_id}"
+                        else:
+                            source_url = source_url or f"https://normy.stn.by/ips.php?{doc_id}"
+                        ips_link = (f'<a class="stn-link stn-link-stn" '
+                                    f'href="{escape(source_url, quote=True)}" target="_blank" '
+                                    f'rel="noopener noreferrer">{rb_label}</a>')
                 elif stn_status_val == "ошибка проверки" or (
                     str(c.error if hasattr(c, "error") else c.get("error") or "").strip()
                 ):
                     err_stn = str(
-                        c.error if hasattr(c, "error") else c.get("error") or "нет связи со Стройдок"
+                        c.error if hasattr(c, "error") else c.get("error") or f"нет связи с {rb_label}"
                     ).replace('"', "'")
                     ips_link = (
                         f'<span class="stn-link stn-link-muted" title="{err_stn}">нет связи</span>'
@@ -1402,7 +1417,7 @@ def normative_refs_to_markdown(
             nc_result = normacs_state(enabled=show_normacs, found=nc_found,
                                       status_id=nc_id, status=str(nc_value("status")),
                                       error=str(nc_value("error")))
-            verdict = combined_verdict(stn_result, nc_result)
+            verdict = combined_verdict(stn_result, nc_result, rb_label=rb_label_full)
             if show_tnpa:
                 # Старые отчёты ТНПА сохраняют собственную схему.
                 if stn_active or tnpa_active:
@@ -1445,8 +1460,10 @@ def normative_refs_to_markdown(
             review_attrs = (
                 f' data-normative-ref="{escape(str(ref), quote=True)}"'
                 f' data-stn-status="{escape(stn_status_val, quote=True)}"'
+                f' data-stn-code="{escape(stn_code_val, quote=True)}"'
                 f' data-stn-found="{int(stn_found)}"'
                 f' data-stn-enabled="{int(show_stn)}"'
+                f' data-rb-provider="{escape(rb_provider, quote=True)}"'
                 f'{combined_attrs}'
                 f' data-normative-title="{escape(stn_value("stn_name"), quote=True)}"'
                 f' data-stn-error="{escape(stn_value("error"), quote=True)}"'
@@ -1463,7 +1480,11 @@ def normative_refs_to_markdown(
                     stn_short = {"active": "Действует", "inactive": "Не действует",
                                  "upcoming": "Не введён", "missing": "Не найден",
                                  "error": "Ошибка", "unknown": "Не определён"}.get(stn_result, "")
+                    if stn_result == "unknown" and stn_status_val.startswith("неполное обозначение"):
+                        stn_short = "Уточните номер и год"
                     stn_cell += f'<br><small title="{escape(stn_status_val, quote=True)}">{stn_short}</small>'
+                    if rb_provider == "stroiprofi" and stn_found and stn_code_val:
+                        stn_cell += f'<br><small>Последняя редакция: {escape(stn_code_val)}</small>'
             if show_stn and show_tnpa:
                 lines.append(
                     f"<td>{escape(str(ref))}</td><td>{ips_link}</td><td>{tnpa_link}</td>"
@@ -1514,7 +1535,7 @@ def normative_refs_to_markdown(
                          'История и условия применения доступны при наведении на статус и в карточке.</p>')
             if show_stn:
                 lines.append('<p>Зелёный итог означает «действует хотя бы по одному реестру», '
-                             'но не подтверждает применимость в другой стране. Стройдок относится к РБ '
+                             f'но не подтверждает применимость в другой стране. {rb_label} относится к РБ '
                              'и проверяется на выбранную дату, NormaCS показывает текущий статус РФ. '
                              'Расхождения отмечены отдельно; «не найден» и ошибка не означают отмену.</p>')
             failed_checks = [c for c in (normacs_checks or [])
@@ -1536,7 +1557,7 @@ def normative_refs_to_markdown(
         if show_stn and show_normacs and not show_tnpa:
             lines.append(
                 f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; '
-                f'найдено в Стройдок: {found_ips}; найдено в NormaCS: {found_normacs};<br>'
+                f'найдено в {rb_label}: {found_ips}; найдено в NormaCS: {found_normacs};<br>'
                 f'действует хотя бы в одном: {active_count}; частично: {partial_count}; '
                 f'расхождения: {conflict_count}</em></p>'
             )
@@ -1547,7 +1568,7 @@ def normative_refs_to_markdown(
             )
         elif show_tnpa and show_stn:
             lines.append(
-                f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; найдено в Стройдок: {found_ips}; '
+                f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; найдено в {rb_label}: {found_ips}; '
                 f"найдено в ТНПА: {found_tnpa};<br>актуально: {active_count}</em></p>"
             )
         elif show_tnpa:
@@ -1557,13 +1578,18 @@ def normative_refs_to_markdown(
             )
         else:
             lines.append(
-                f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; найдено в Стройдок: {found_ips};'
+                f'<p class="normative-table-summary"><em>Всего в документе: {len(refs)}; найдено в {rb_label}: {found_ips};'
                 f"<br>актуально: {active_count}</em></p>"
             )
         lines.append("")
 
     stn_error = (stn_error or "").strip() if show_stn else ""
-    if stn_checks and not stn_error:
+    if rb_provider == "stroiprofi" and stn_checks and not stn_error:
+        failures = [str(c.error if hasattr(c, "error") else c.get("error") or "")
+                    for c in stn_checks]
+        if failures and all(failures):
+            stn_error = f"Стройпрофи: не удалось проверить документы ({failures[0]})"
+    elif stn_checks and not stn_error:
         login_like = sum(
             1
             for c in stn_checks
@@ -1601,8 +1627,7 @@ def normative_refs_to_markdown(
                     stn_error = statuses[0]
                 elif statuses and all(s == "нет в ИПС" for s in statuses):
                     stn_error = (
-                        "Стройдок: документы не найдены в ИПС "
-                        "(проверьте PDF_STN_LOGIN/PDF_STN_PASSWORD в .env)"
+                        f"{rb_label}: документы не найдены в каталоге"
                     )
     if stn_error:
         lines.extend(["", f"<p><em>⚠ {stn_error}</em></p>", ""])
@@ -1733,6 +1758,7 @@ def normative_result_to_markdown(
         include_context=include_context,
         stn_checks=checks,
         include_stn=show_stn,
+        rb_provider=str(result.get("rb_provider") or "stn"),
         tnpa_checks=tnpa if show_tnpa else None,
         include_tnpa=bool(show_tnpa),
         normacs_checks=result.get("normacs_checks"),
@@ -1744,6 +1770,7 @@ def normative_result_to_markdown(
         page_count=int(result.get("page_count") or 0),
         pages_processed=int(result.get("pages_processed") or 0),
         budget_exhausted=bool(result.get("budget_exhausted")),
+        merged_fragment_count=int(result.get("merged_fragment_count") or 0),
         source_path=source_path,
         page_normative_refs=list(result.get("page_normative_refs") or []),
         page_preview_words=list(result.get("page_preview_words") or []),

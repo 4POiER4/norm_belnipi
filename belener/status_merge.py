@@ -27,6 +27,8 @@ def stn_state(*, enabled: bool, found: bool, status: str = "", error: str = "") 
             return "inactive"
         if value in ("не введён", "не введен"):
             return "upcoming"
+        if "частично" in value:
+            return "partial"
         return "unknown"
     if value.startswith(("нет в", "не в", "не найден")):
         return "missing"
@@ -49,9 +51,9 @@ def normacs_state(*, enabled: bool, found: bool, status_id: str = "",
     return "unknown"
 
 
-def combined_verdict(stn: str, normacs: str) -> RegistryVerdict:
+def combined_verdict(stn: str, normacs: str, *, rb_label: str = "Стройдок · РБ") -> RegistryVerdict:
     """Зелёный = действует хотя бы в одном; явное расхождение всегда видно."""
-    sources = (("Стройдок · РБ", stn), ("NormaCS · РФ", normacs))
+    sources = ((rb_label, stn), ("NormaCS · РФ", normacs))
     active = [name for name, state in sources if state == "active"]
     inactive = [name for name, state in sources if state == "inactive"]
     partial = [name for name, state in sources if state == "partial"]
@@ -65,8 +67,9 @@ def combined_verdict(stn: str, normacs: str) -> RegistryVerdict:
             note = (note + " " if note else "") + "Второй реестр не проверен."
         return RegistryVerdict("active", label, "good", note, conflict)
     if partial:
-        return RegistryVerdict("partial", "Частично действует · NormaCS · РФ", "warn",
-                               "Проверьте ограничения в карточке NormaCS.", bool(inactive or upcoming))
+        partial_label = ", ".join(partial)
+        return RegistryVerdict("partial", f"Частично действует · {partial_label}", "warn",
+                               "Проверьте ограничения в карточке источника.", bool(inactive or upcoming))
     if upcoming:
         return RegistryVerdict("upcoming", "Не введён / проект", "warn",
                                "Документ ещё не действует в указанном реестре.", bool(inactive))

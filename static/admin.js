@@ -113,7 +113,7 @@
         <div class="admin-card">
           <span class="admin-badge">Первый запуск</span>
           <h2>Настройка для вашей организации</h2>
-          <p class="admin-desc">Сначала подключите Active Directory — через него будут входить администраторы этой панели. Интеграции с внешними сайтами (Стройдок и др.) можно добавить позже во вкладке «Интеграции»; они сразу используются основным приложением при проверке нормативов.</p>
+          <p class="admin-desc">Сначала подключите Active Directory — через него будут входить администраторы этой панели. Интеграции с внешними сайтами (Стройпрофи и NormaCS) можно добавить позже во вкладке «Интеграции»; они сразу используются основным приложением при проверке нормативов.</p>
           <ul class="admin-checklist">
             <li><strong>Шаг 1.</strong> Укажите параметры AD и список администраторов панели.</li>
             <li><strong>Шаг 2.</strong> Войдите под своей учётной записью AD и при необходимости добавьте сайты с логином и паролем.</li>
@@ -309,16 +309,16 @@
     return `
       <form class="site-form admin-form-grid" data-site-id="${esc(site.id || "")}">
         ${field(prefix + "name", "Название", site.name || "", {
-          placeholder: "NormaCS или Стройдок (normy.stn.by)",
+          placeholder: "Стройпрофи или NormaCS",
           required: true,
           hint: "Произвольное имя для отображения в списке",
         })}
         ${field(prefix + "url", "Адрес сайта", site.site_url || "", {
           placeholder: "http://n.nanocad.ru:9999/normacsweb/",
           required: true,
-          hint: "Полный URL веб-интерфейса Стройдока или NormaCS, включая http:// или https://",
+          hint: "Полный URL Стройпрофи или NormaCS, включая http:// или https://",
         })}
-        ${field(prefix + "login", "Логин", site.login || "", { hint: "Учётная запись Стройдока или NormaCS" })}
+        ${field(prefix + "login", "Логин", site.login || "", { hint: "Учётная запись Стройпрофи или NormaCS" })}
         ${field(prefix + "pass", "Пароль", "", {
           type: "password",
           hint: isNew ? "Пароль хранится в базе в зашифрованном виде" : site.password_set ? "Сохранён — пусто = не менять" : "Не задан",
@@ -341,7 +341,7 @@
 
     const list =
       sites.length === 0 && !state.sitesAdding
-        ? `<p class="admin-desc">Пока нет подключённых сайтов. Добавьте Стройдок и NormaCS для проверки нормативов.</p>`
+        ? `<p class="admin-desc">Пока нет подключённых сайтов. Добавьте Стройпрофи и NormaCS для проверки нормативов.</p>`
         : sites
             .map(function (site) {
               if (state.sitesEditing === site.id) {
@@ -352,7 +352,9 @@
             <div class="admin-site-head">
               <h2>${esc(site.name)}</h2>
               ${site.kind === "stn"
-                ? '<span class="admin-site-tag">Стройдок</span>'
+                ? '<span class="admin-site-tag">Стройдок (отключён)</span>'
+                : site.kind === "stroiprofi"
+                  ? '<span class="admin-site-tag">Стройпрофи</span>'
                 : site.kind === "normacs"
                   ? '<span class="admin-site-tag">NormaCS</span>'
                 : site.kind === "tnpa"
@@ -377,7 +379,7 @@
         <div class="admin-site-toolbar">
           <div>
             <h2>Внешние сайты</h2>
-            <p class="admin-desc" style="margin-bottom:0">Проверка нормативов: Стройдок (РБ) и NormaCS (РФ).</p>
+            <p class="admin-desc" style="margin-bottom:0">Проверка нормативов: Стройпрофи (РБ) и NormaCS (РФ). Старые записи Стройдока не используются.</p>
           </div>
           ${!state.sitesAdding ? `<button type="button" class="btn btn-primary btn-sm" id="btn-add-site">+ Добавить сайт</button>` : ""}
         </div>

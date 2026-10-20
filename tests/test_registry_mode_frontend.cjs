@@ -14,11 +14,11 @@ const context = {document: {
 }};
 vm.createContext(context);
 vm.runInContext('let currentRegistryStatus = null;\n' + source.slice(start, end), context);
-vm.runInContext("currentRegistryStatus = {stn:{enabled:true,configured:true},normacs:{enabled:true,configured:true}}; updateRegistryModeUI();", context);
-assert.match(badge.textContent, /Стройдок · РБ \+ NormaCS · РФ/);
-assert.match(welcome.textContent, /Стройдок · РБ \+ NormaCS · РФ/);
-assert.match(step.textContent, /Стройдок · РБ \+ NormaCS · РФ/);
+vm.runInContext("currentRegistryStatus = {stroiprofi:{enabled:true,configured:true},normacs:{enabled:true,configured:true}}; updateRegistryModeUI();", context);
+assert.match(badge.textContent, /Стройпрофи · РБ \+ NormaCS · РФ/);
+assert.match(welcome.textContent, /Стройпрофи · РБ \+ NormaCS · РФ/);
+assert.match(step.textContent, /Стройпрофи · РБ \+ NormaCS · РФ/);
 assert.equal(badge.classList.warn, false);
-vm.runInContext("currentRegistryStatus = {stn:{enabled:false},normacs:{enabled:true,configured:true}}; updateRegistryModeUI();", context);
+vm.runInContext("currentRegistryStatus = {stroiprofi:{enabled:false},normacs:{enabled:true,configured:true}}; updateRegistryModeUI();", context);
 assert.equal(badge.textContent, 'Проверка: NormaCS · РФ');
 console.log('Registry mode UI: dual and NormaCS-only labels OK');

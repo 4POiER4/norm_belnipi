@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import logging
+import re
 import time
 from typing import Any
 
 import fitz
 
-from belener.normative_refs import merge_normative_refs, merge_normative_refs_from_sources
+from belener.normative_refs import (dedupe_normative_list, extract_normative_refs,
+                                    merge_normative_refs, merge_normative_refs_from_sources)
 from belener.tile_ocr import (
     PIPELINE,
     TILE_COLS,
@@ -68,6 +70,35 @@ def _merge_document_refs(
     return refs, page_normative_refs
 
 
+def _prefer_complete_layer_refs(refs: list[dict], layer_refs: list[dict]) -> list[dict]:
+    """Достроить обрезанные OCR-номера из достоверного текстового слоя PDF."""
+    def key(value: str) -> str:
+        return re.sub(r"[^0-9A-ZА-ЯЁ]", "", value.upper().replace("–", "-").replace("—", "-"))
+
+    def has_year(kind: str, value: str) -> bool:
+        if re.search(r"-(?:19|20)\d{2}\b", value):
+            return True
+        return kind in ("ГОСТ", "ОСТ", "СНиП", "СТБ") and bool(re.search(r"-\d{2}\b", value))
+
+    full = [r for r in layer_refs if has_year(str(r.get("kind") or ""), str(r.get("ref") or ""))]
+    out = []
+    for item in refs:
+        kind = str(item.get("kind") or "")
+        current = str(item.get("ref") or "")
+        current_key = key(current)
+        if has_year(kind, current) or len(re.sub(r"\D", "", current)) < 5:
+            out.append(item)
+            continue
+        candidates = [r for r in full if r.get("kind") == kind
+                      and key(str(r.get("ref") or "")).startswith(current_key)]
+        unique = {key(str(r.get("ref") or "")): r for r in candidates}
+        if len(unique) == 1:
+            out.append({**item, "ref": str(next(iter(unique.values())).get("ref"))})
+        else:
+            out.append(item)
+    return dedupe_normative_list(out)
+
+
 def extract_normatives_page_tiles(doc, page_index, *, dpi, deadline, tile_max_sec, overlap_frac):
     from belener.tile_ocr import extract_page_tiles
 
@@ -94,6 +125,8 @@ def extract_normatives_document_crops(
     )
     page_texts = list(tiles.get("page_texts") or [])
     all_sources = list(tiles.get("all_sources") or [])
+    layer_refs: list[dict] = []
+    layer_refs_by_page: dict[int, list[dict]] = {}
 
     # Полный текстовый слой листа — даже если tile OCR оборвался по бюджету.
     # Иначе на searchable PDF теряются ГОСТ/СН из непройденных тайлов.
@@ -109,6 +142,8 @@ def extract_normatives_document_crops(
             layer = ""
         if not layer:
             continue
+        layer_refs_by_page[i] = extract_normative_refs(layer)
+        layer_refs.extend(layer_refs_by_page[i])
         if i < len(page_texts):
             if layer not in page_texts[i]:
                 page_texts[i] = f"{layer}\n\n{page_texts[i]}".strip() if page_texts[i] else layer
@@ -121,6 +156,13 @@ def extract_normatives_document_crops(
     # Сначала постраничные (как жёлтая подсветка), потом документный merge —
     # иначе соседи СН/СП пропадают из таблицы или уезжают в конец списка.
     refs, page_normative_refs = _merge_document_refs(page_texts, all_sources)
+    raw_refs_count = len(refs)
+    if layer_refs:
+        refs = _prefer_complete_layer_refs(refs, layer_refs)
+        page_normative_refs = [
+            _prefer_complete_layer_refs(items, layer_refs_by_page.get(i, []))
+            for i, items in enumerate(page_normative_refs)
+        ]
     log.info(
         "normative merge done %.1fs pages=%s refs=%s",
         time.monotonic() - parse_t0,
@@ -138,6 +180,7 @@ def extract_normatives_document_crops(
         "elapsed_sec": tiles.get("elapsed_sec", 0.0),
         "pipeline": f"{PIPELINE}+normative",
         "normative_refs": refs,
+        "merged_fragment_count": max(0, raw_refs_count - len(refs)),
         "page_normative_refs": page_normative_refs,
         "page_preview_words": tiles.get("page_preview_words") or [],
         "page_tile_zones": tiles.get("page_tile_zones") or [],

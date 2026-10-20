@@ -462,11 +462,11 @@ function buildNormativeTablePdfPayload(workspaceEl) {
   }
   if (!summary) {
     const m = (workspaceEl.innerText || '').match(
-      /Всего в документе:\s*\d+;\s*найдено в Стройдок:\s*\d+;(?:\s*найдено в ТНПА:\s*\d+;)?\s*актуально:\s*\d+/i
+      /Всего в документе:\s*\d+;\s*найдено в (?:Стройдок|Стройпрофи):\s*\d+;(?:\s*найдено в ТНПА:\s*\d+;)?\s*актуально:\s*\d+/i
     );
     if (m) summary = m[0].replace(/\s+/g, ' ').trim();
   }
-  if (!summary && rows.length && headers.some(h => /normacs/i.test(h)) && !headers.some(h => /стройдок/i.test(h))) {
+  if (!summary && rows.length && headers.some(h => /normacs/i.test(h)) && !headers.some(h => /стройдок|стройпрофи/i.test(h))) {
     const ncLinkIndex = headers.findIndex(h => /^normacs$/i.test(h));
     const ncStatusIndex = headers.findIndex(h => /статус.*normacs/i.test(h));
     const found = rows.filter(r => r.cells[ncLinkIndex]?.href).length;
@@ -474,23 +474,25 @@ function buildNormativeTablePdfPayload(workspaceEl) {
     summary = `Всего в документе: ${rows.length}; найдено в NormaCS: ${found};\nдействует: ${active}`;
   }
   if (!summary && rows.length && tableEl.querySelector('tbody tr[data-overall-label]')
-      && headers.some(h => /стройдок/i.test(h)) && headers.some(h => /normacs/i.test(h))) {
+      && headers.some(h => /стройдок|стройпрофи/i.test(h)) && headers.some(h => /normacs/i.test(h))) {
+    const rbLabel = headers.some(h => /стройпрофи/i.test(h)) ? 'Стройпрофи' : 'Стройдок';
     const ncIndex = headers.findIndex(h => /^normacs$/i.test(h));
     const foundStn = rows.filter(r => r.cells[1]?.href).length;
     const foundNc = rows.filter(r => r.cells[ncIndex]?.href).length;
     const active = rows.filter(r => r.fill === 'active').length;
-    summary = `Всего в документе: ${rows.length}; найдено в Стройдок: ${foundStn}; `
+    summary = `Всего в документе: ${rows.length}; найдено в ${rbLabel}: ${foundStn}; `
       + `найдено в NormaCS: ${foundNc};\nдействует хотя бы в одном: ${active}`;
   }
   if (!summary && rows.length) {
+    const rbLabel = headers.some(h => /стройпрофи/i.test(h)) ? 'Стройпрофи' : 'Стройдок';
     const foundStn = rows.filter(r => r.cells[1] && r.cells[1].href).length;
     const active = rows.filter(r => r.fill === 'active').length;
     const hasTnpa = headers.some(h => /тнпа/i.test(h));
     if (hasTnpa) {
       const foundTnpa = rows.filter(r => r.cells[2] && r.cells[2].href).length;
-      summary = `Всего в документе: ${rows.length}; найдено в Стройдок: ${foundStn}; найдено в ТНПА: ${foundTnpa};\nактуально: ${active}`;
+      summary = `Всего в документе: ${rows.length}; найдено в ${rbLabel}: ${foundStn}; найдено в ТНПА: ${foundTnpa};\nактуально: ${active}`;
     } else {
-      summary = `Всего в документе: ${rows.length}; найдено в Стройдок: ${foundStn};\nактуально: ${active}`;
+      summary = `Всего в документе: ${rows.length}; найдено в ${rbLabel}: ${foundStn};\nактуально: ${active}`;
     }
   }
   summary = summary.replace(/ИПС/gi, 'Стройдок');
@@ -686,7 +688,7 @@ function beautifyNormativeHtml(root) {
 
   root.querySelectorAll('.normative-workspace').forEach(workspace => {
     workspace.querySelectorAll('.normative-table-container tbody td:nth-child(2) a.stn-link').forEach(a => {
-      if (!a.textContent.trim()) a.textContent = 'Стройдок';
+      if (!a.textContent.trim()) a.textContent = workspace.querySelector('[data-rb-provider="stroiprofi"]') ? 'Стройпрофи' : 'Стройдок';
     });
     workspace.querySelectorAll('.normative-table-summary').forEach(el => {
       el.innerHTML = (el.innerHTML || '').replace(/ИПС/gi, 'Стройдок');
@@ -1370,10 +1372,10 @@ async function loadModels() {
 
 function updateRegistryModeUI() {
   if (!currentRegistryStatus) return;
-  const stn = currentRegistryStatus.stn || {};
+  const stn = currentRegistryStatus.stroiprofi || {};
   const normacs = currentRegistryStatus.normacs || {};
   const sources = [];
-  if (stn.enabled) sources.push('Стройдок · РБ');
+  if (stn.enabled) sources.push('Стройпрофи · РБ');
   if (normacs.enabled) sources.push('NormaCS · РФ');
   const sourceText = sources.join(' + ') || 'реестры не настроены';
   const badge = document.getElementById('normacs-mode-badge');
@@ -1397,9 +1399,9 @@ async function loadSystemStatus() {
     const modelSection = document.getElementById('model-section');
     if (data.gost_only && modelSection) modelSection.hidden = true;
 
-    const stn = data.stn || {};
+    const stn = data.stroiprofi || {};
     const normacs = data.normacs || {};
-    currentRegistryStatus = {stn, normacs};
+    currentRegistryStatus = {stroiprofi: stn, normacs};
     updateRegistryModeUI();
     const dateField = document.getElementById('stn-check-date-field');
     if (dateField) dateField.hidden = !stn.enabled;
@@ -1408,16 +1410,16 @@ async function loadSystemStatus() {
       banner.hidden = false;
       banner.className = 'system-banner warn';
       banner.textContent = normacs.enabled && normacs.configured
-        ? 'Проверка Стройдока отключена. По умолчанию проверяется только NormaCS.'
-        : 'Стройдок отключён, а NormaCS не настроен. Укажите логин и пароль в Интеграциях.';
+        ? 'Проверка Стройпрофи отключена. Проверяется только NormaCS.'
+        : 'Стройпрофи отключён, а NormaCS не настроен. Укажите логин и пароль в Интеграциях.';
     } else if (!stn.configured) {
       banner.hidden = false;
       banner.className = 'system-banner warn';
-      banner.textContent = 'STN включён, но логин и пароль не настроены (админка → Интеграции или .env). Актуальность может быть недоступна.';
+      banner.textContent = 'Стройпрофи: учётные данные не настроены. Метаданные открытого фонда доступны, для полного доступа укажите логин и пароль.';
     } else {
       banner.hidden = false;
       banner.className = 'system-banner ok';
-      banner.textContent = 'STN подключён: актуальность нормативов будет проверяться на normy.stn.by.';
+      banner.textContent = 'Стройпрофи подключён: актуальность нормативов РБ будет проверяться на выбранную дату.';
     }
     if (normacs.enabled) {
       banner.textContent += normacs.configured

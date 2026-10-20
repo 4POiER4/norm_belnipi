@@ -6,26 +6,26 @@ from typing import Any
 
 INTEGRATIONS: list[dict[str, Any]] = [
     {
-        "id": "stn",
-        "name": "Стройдок (normy.stn.by)",
-        "description": "Проверка актуальности нормативов в фонде ИПС.",
-        "prefix": "stn",
+        "id": "stroiprofi",
+        "name": "Стройпрофи (стройпрофи.бел)",
+        "description": "Проверка статуса нормативов РБ на выбранную дату.",
+        "prefix": "stroiprofi",
         "fields": [
             {
                 "key": "base_url",
                 "label": "Адрес портала",
                 "secret": False,
-                "placeholder": "https://normy.stn.by",
+                "placeholder": "https://стройпрофи.бел",
             },
             {
                 "key": "login",
-                "label": "Логин ИПС",
+                "label": "Логин Стройпрофи",
                 "secret": False,
                 "placeholder": "user@company.by",
             },
             {
                 "key": "password",
-                "label": "Пароль ИПС",
+                "label": "Пароль Стройпрофи",
                 "secret": True,
                 "placeholder": "••••••••",
             },
